@@ -1,25 +1,26 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
-        <OutputType>library</OutputType>
-        <RootNamespace>Cvoya.Graph.Model.Neo4j</RootNamespace>
-        <AssemblyName>Cvoya.Graph.Model.Neo4j</AssemblyName>
+        <OutputType>Library</OutputType>
+        <RootNamespace>Cvoya.Graph.Model.Age</RootNamespace>
+        <AssemblyName>Cvoya.Graph.Model.Age</AssemblyName>
     </PropertyGroup>
 
     <PropertyGroup>
-        <PackageId>Cvoya.Graph.Model.Neo4j</PackageId>
-        <Description>A graph provider for the Neo4j database with support for LINQ and the updated Graph.Model abstraction.</Description>
-        <PackageTags>graph;database;neo4j;linq</PackageTags>
+        <PackageId>Cvoya.Graph.Model.Age</PackageId>
+        <Description>PostgreSQL Apache AGE provider for the GraphModel abstraction with LINQ and Cypher support.</Description>
+        <PackageTags>graph;database;postgres;age;cypher</PackageTags>
     </PropertyGroup>
 
     <ItemGroup>
         <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
-            <_Parameter1>Cvoya.Graph.Model.Neo4j.Tests</_Parameter1>
+            <_Parameter1>Cvoya.Graph.Model.Age.Tests</_Parameter1>
         </AssemblyAttribute>
     </ItemGroup>
 
     <ItemGroup>
-        <PackageReference Include="Neo4j.Driver" Version="5.28.3" />
+        <PackageReference Include="Konnektr.Npgsql.Age" Version="1.1.0" />
+        <PackageReference Include="Npgsql" Version="9.0.4" />
     </ItemGroup>
 
     <!-- Use project references for development (default) -->
