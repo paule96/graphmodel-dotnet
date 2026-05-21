@@ -60,7 +60,11 @@ internal static class AgeSerializationBridge
             }
             else if (property.Value is EntityCollection entityCollection)
             {
-                properties[name] = entityCollection.Entities.Select(e => SerializeAllProperties(e)).ToList();
+                var items = entityCollection.Entities.Select(e => SerializeAllProperties(e)).ToList();
+                // Serialize complex collections as JSON strings to ensure proper
+                // round-tripping through AGE, which does not handle
+                // List<Dictionary<string, object?>> parameters correctly.
+                properties[name] = JsonSerializer.Serialize(items);
             }
         }
         return properties;

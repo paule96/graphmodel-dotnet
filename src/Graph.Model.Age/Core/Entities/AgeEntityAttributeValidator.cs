@@ -43,28 +43,45 @@ internal static class AgeEntityAttributeValidator
         ArgumentNullException.ThrowIfNull(node);
         await EnsureSchemaInitializedAsync(context.SchemaRegistry, cancellationToken).ConfigureAwait(false);
 
-        var nodeType = node.GetType();
-        var schemaLabel = Labels.GetLabelFromType(nodeType);
-        if (context.SchemaRegistry.GetNodeSchema(schemaLabel) is not { } schema)
+        // For DynamicNode, use the explicitly set Labels instead of CLR type name
+        List<string> schemaLabels;
+        if (node is DynamicNode dynamicNode)
         {
-            return;
+            schemaLabels = dynamicNode.Labels.ToList();
+        }
+        else
+        {
+            schemaLabels = [Labels.GetLabelFromType(node.GetType())];
         }
 
-        ValidatePropertyRules(node, schema, schemaLabel);
+        foreach (var schemaLabel in schemaLabels)
+        {
+            if (context.SchemaRegistry.GetNodeSchema(schemaLabel) is not { } schema)
+                continue;
 
-        await ValidateUniqueConstraintsAsync(
-                entityId: node.Id,
-                entity: node,
-                schema: schema,
-                context: context,
-                transaction: transaction,
-                alias: "n",
-                labelForMatch: Labels.GetBaseTypeLabel(nodeType),
-                entityDisplayName: schema.Label,
-                isRelationship: false,
-                isUpdate: isUpdate,
-                cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
+            if (node is DynamicNode dynNode)
+                ValidateDynamicPropertyRules(dynNode.Properties, schema, schemaLabel);
+            else
+                ValidatePropertyRules(node, schema, schemaLabel);
+
+            if (schema.HasCompositeKey() || schema.Properties.Values.Any(p => p.IsUnique))
+            {
+                var nodeType = node.GetType();
+                await ValidateUniqueConstraintsAsync(
+                        entityId: node.Id,
+                        entity: node,
+                        schema: schema,
+                        context: context,
+                        transaction: transaction,
+                        alias: "n",
+                        labelForMatch: Labels.GetBaseTypeLabel(nodeType),
+                        entityDisplayName: schema.Label,
+                        isRelationship: false,
+                        isUpdate: isUpdate,
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
     }
 
     public static async Task ValidateRelationshipAsync<TRelationship>(
@@ -78,28 +95,45 @@ internal static class AgeEntityAttributeValidator
         ArgumentNullException.ThrowIfNull(relationship);
         await EnsureSchemaInitializedAsync(context.SchemaRegistry, cancellationToken).ConfigureAwait(false);
 
-        var relationshipType = relationship.GetType();
-        var schemaLabel = Labels.GetLabelFromType(relationshipType);
-        if (context.SchemaRegistry.GetRelationshipSchema(schemaLabel) is not { } schema)
+        // For DynamicRelationship, use the explicitly set Type instead of CLR type name
+        List<string> schemaLabels;
+        if (relationship is DynamicRelationship dynamicRel)
         {
-            return;
+            schemaLabels = [dynamicRel.Type];
+        }
+        else
+        {
+            schemaLabels = [Labels.GetLabelFromType(relationship.GetType())];
         }
 
-        ValidatePropertyRules(relationship, schema, schemaLabel);
+        foreach (var schemaLabel in schemaLabels)
+        {
+            if (context.SchemaRegistry.GetRelationshipSchema(schemaLabel) is not { } schema)
+                continue;
 
-        await ValidateUniqueConstraintsAsync(
-                entityId: relationship.Id,
-                entity: relationship,
-                schema: schema,
-                context: context,
-                transaction: transaction,
-                alias: "r",
-                labelForMatch: Labels.GetBaseTypeLabel(relationshipType),
-                entityDisplayName: schema.Label,
-                isRelationship: true,
-                isUpdate: isUpdate,
-                cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
+            if (relationship is DynamicRelationship dynRel)
+                ValidateDynamicPropertyRules(dynRel.Properties, schema, schemaLabel);
+            else
+                ValidatePropertyRules(relationship, schema, schemaLabel);
+
+            if (schema.HasCompositeKey() || schema.Properties.Values.Any(p => p.IsUnique))
+            {
+                var relType = relationship.GetType();
+                await ValidateUniqueConstraintsAsync(
+                        entityId: relationship.Id,
+                        entity: relationship,
+                        schema: schema,
+                        context: context,
+                        transaction: transaction,
+                        alias: "r",
+                        labelForMatch: Labels.GetBaseTypeLabel(relType),
+                        entityDisplayName: schema.Label,
+                        isRelationship: true,
+                        isUpdate: isUpdate,
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
     }
 
     private static async Task EnsureSchemaInitializedAsync(SchemaRegistry registry, CancellationToken cancellationToken)
@@ -153,6 +187,96 @@ internal static class AgeEntityAttributeValidator
             }
 
             ValidatePropertyValue(propertyDisplayName, value, validation, entityDisplayName);
+        }
+    }
+
+    private static void ValidateDynamicPropertyRules(
+        IReadOnlyDictionary<string, object?> properties,
+        EntitySchemaInfo schema,
+        string entityDisplayName)
+    {
+        // First pass: check all required properties from schema are present.
+        // Dynamic entities use attribute Label values (e.g., "requiredString") as property keys,
+        // NOT C# property names (e.g., "RequiredString"). Match against PropertySchemaInfo.Name
+        // which contains the graph property name (attribute Label or C# fallback).
+        foreach (var propertySchema in schema.Properties.Values)
+        {
+            if (propertySchema.Ignore)
+                continue;
+
+            var graphName = propertySchema.Name;
+            var exists = properties.TryGetValue(graphName, out var value);
+
+            if (propertySchema.IsRequired)
+            {
+                if (!exists || value is null || (value is string stringValue && string.IsNullOrWhiteSpace(stringValue)))
+                {
+                    // For required properties not provided, check if there's a CLR default value
+                    if (!exists)
+                    {
+                        var propInfo = propertySchema.PropertyInfo;
+                        if (propInfo != null && propInfo.DeclaringType != null)
+                        {
+                            try
+                            {
+                                var defaultInstance = Activator.CreateInstance(propInfo.DeclaringType);
+                                var defaultValue = propInfo.GetValue(defaultInstance);
+                                if (defaultValue != null && (defaultValue is not string ds || !string.IsNullOrWhiteSpace(ds)))
+                                    continue;
+                            }
+                            catch { }
+                        }
+                    }
+
+                    throw new GraphException($"Property '{graphName}' on {entityDisplayName} is required but not provided.");
+                }
+            }
+
+            if (!exists || value is null)
+                continue;
+
+            // Validate enum values: if the CLR property type is an enum and the
+            // dynamic value is a string, check it parses to a valid enum member.
+            var enumPropInfo = propertySchema.PropertyInfo;
+            if (enumPropInfo != null && enumPropInfo.PropertyType.IsEnum && value is string enumStr)
+            {
+                try
+                {
+                    var _ = Enum.Parse(enumPropInfo.PropertyType, enumStr, ignoreCase: false);
+                }
+                catch
+                {
+                    throw new GraphException($"Property '{graphName}' on {entityDisplayName} has value '{enumStr}' which is not a valid {enumPropInfo.PropertyType.Name} enum value.");
+                }
+            }
+
+            var validation = propertySchema.Validation;
+            if (validation.MinLength is null && validation.MaxLength is null && string.IsNullOrWhiteSpace(validation.Pattern)
+                && validation.MinValue is null && validation.MaxValue is null)
+                continue;
+
+            ValidatePropertyValue(graphName, value, validation, entityDisplayName);
+        }
+
+        // Second pass: check for extra/unknown properties.
+        // Dynamic entities use attribute Label values, so match only against
+        // PropertySchemaInfo.Name (the graph property name), NOT C# property names.
+        // This means "Note" (PascalCase) is correctly rejected when the Label is "note".
+        foreach (var (propName, _) in properties)
+        {
+            if (propName == nameof(INode.Labels) || propName == "user_id" ||
+                propName == nameof(IRelationship.StartNodeId) ||
+                propName == nameof(IRelationship.EndNodeId) ||
+                propName == nameof(IRelationship.Type))
+                continue;
+
+            var isKnown = schema.Properties.Values.Any(p =>
+                string.Equals(p.Name, propName, StringComparison.Ordinal));
+
+            if (!isKnown)
+            {
+                throw new GraphException($"Property '{propName}' is not defined in the schema for {entityDisplayName}.");
+            }
         }
     }
 

@@ -147,7 +147,21 @@ internal sealed class TraversalFragmentVisitor : FragmentEmittingVisitorBase
         var fullRel = $"{leftArrow}[{relAlias}{depthPattern}]{rightArrow}";
 
         if (isChained)
+        {
+            // For chained path segments, we normally use the shorthand without the source
+            // node (it's assumed to be the previous hop's target). However, if there was
+            // an intermediate Select (e.g., Select(ps => ps.StartNode)) that changed the
+            // current alias to a different variable, we must emit the full pattern with
+            // the explicit source.
+            var prevTgt = $"tgt{Context.Scope.CurrentHop - 1}";
+            if (srcAlias != prevTgt)
+            {
+                Logger.LogDebug("Chained PathSegments: using full pattern with srcAlias '{SrcAlias}' (expected '{PrevTgt}')",
+                    srcAlias, prevTgt);
+                return $"({srcAlias}:{srcLabel}){fullRel}({tgtAlias}:{tgtLabel})";
+            }
             return $"{fullRel}({tgtAlias}:{tgtLabel})";
+        }
 
         return $"({srcAlias}:{srcLabel}){fullRel}({tgtAlias}:{tgtLabel})";
     }

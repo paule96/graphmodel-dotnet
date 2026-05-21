@@ -122,6 +122,40 @@ internal sealed class AgeEntityMapper
                 convertedValue = ConvertJsonElementToDictionary(convJson);
             }
 
+            // Handle JSON string that contains a serialized complex collection.
+            // When a List<Dictionary<string, object?>> is stored in AGE, it comes
+            // back as a string. The format may be:
+            //   - A proper JSON array: "[{...},{...}]" (from our JsonSerializer change)
+            //   - Concatenated objects: "{...},{...}" (AGE's internal representation)
+            // Parse it back into a List<IDictionary<string, object?>> for the
+            // EntityCollection code path below.
+            if (convertedValue is string strVal && strVal.Length >= 2 && (strVal[0] == '[' || strVal[0] == '{'))
+            {
+                var jsonToParse = strVal[0] == '[' ? strVal : $"[{strVal}]";
+                try
+                {
+                    using var doc = JsonDocument.Parse(jsonToParse);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0
+                        && doc.RootElement[0].ValueKind == JsonValueKind.Object)
+                    {
+                        var parsedItems = doc.RootElement.EnumerateArray()
+                            .Select(e => (object)ConvertJsonElementToDictionary(e))
+                            .Where(static item => item is IDictionary<string, object?>)
+                            .ToList();
+                        if (parsedItems.Count > 0)
+                        {
+                            convertedValue = parsedItems;
+                            _logger.LogDebug("MapVertex: Parsed JSON collection for property '{Prop}' with {Count} items",
+                                csharpPropertyName, parsedItems.Count);
+                        }
+                    }
+                }
+                catch
+                {
+                    // Not valid JSON — treat as a regular string
+                }
+            }
+
             if (convertedValue is IDictionary<string, object?> dict && !GraphDataModel.IsSimple(dict.GetType()))
             {
                 var entityInfo = CreateEntityInfoFromDictionary(dict, csharpPropertyName);
