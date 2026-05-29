@@ -123,6 +123,14 @@ public sealed record GroupByFragment(string Expression, string Alias)
     : QueryFragment("GroupBy", ImmutableArray<string>.Empty, ImmutableArray<string>.Empty, Alias);
 
 /// <summary>
+/// Represents a collect() expression for nested collection projections inside RETURN.
+/// Used when a GroupBy→Select chain contains nested .Select().ToList() projections.
+/// Generates Cypher like: collect({Name: tgt0.FirstName, Age: tgt0.Age}) AS c_FriendDetails
+/// </summary>
+public sealed record CollectFragment(string CollectExpression, string Alias, string ProjectionColumn)
+    : QueryFragment("Collect", ImmutableArray<string>.Empty, ImmutableArray<string>.Empty, Alias);
+
+/// <summary>
 /// Deterministic alias manager for generating consistent node and relationship aliases.
 /// </summary>
 public sealed class AliasManager

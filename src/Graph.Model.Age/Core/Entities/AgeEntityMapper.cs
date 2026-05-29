@@ -439,6 +439,29 @@ internal sealed class AgeEntityMapper
             if (effectiveType == typeof(decimal) && decimal.TryParse(strVal, NumberStyles.Any, CultureInfo.InvariantCulture, out var decVal)) return decVal;
         }
 
+        // Handle numeric type conversions for edge entity property values
+        // that come from AGE as types different from the target CLR type
+        // (e.g., AGE returns Decimal for numeric properties, target expects double).
+        if (value is not string && effectiveType != value.GetType())
+        {
+            try
+            {
+                if (effectiveType == typeof(double) && value is decimal decVal)
+                    return (double)decVal;
+                if (effectiveType == typeof(float) && value is decimal decFloat)
+                    return (float)decFloat;
+                if (effectiveType == typeof(int) && value is long longVal)
+                    return (int)longVal;
+                if (effectiveType == typeof(long) && value is int intVal)
+                    return (long)intVal;
+                return Convert.ChangeType(value, effectiveType, CultureInfo.InvariantCulture);
+            }
+            catch
+            {
+                // If conversion fails, fall through to return original value
+            }
+        }
+
         return value;
     }
 

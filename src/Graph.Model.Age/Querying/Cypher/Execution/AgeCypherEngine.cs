@@ -73,6 +73,12 @@ internal sealed class AgeCypherEngine
             // Detect if this is an aggregation operation
             var aggregationOp = DetectAggregationType(expression);
             var isAggregation = aggregationOp != null;
+
+            // Handle ToDictionary specially — execute the underlying query then build the dictionary client-side
+            if (aggregationOp == "ToDictionary")
+            {
+                return await ExecuteToDictionaryAsync<T>(expression, transaction, cancellationToken);
+            }
             
             // Extract the element type from the expression
             // For aggregation operations, use the result type T instead of the source element type
@@ -131,7 +137,7 @@ internal sealed class AgeCypherEngine
     private (string cypher, Dictionary<string, object?> parameters) BuildCypherQuery(Type elementType, Expression expression)
     {
         // Use the visitor pattern for sophisticated LINQ query translation
-        var context = new CypherQueryContext(elementType, _loggerFactory);
+        var context = new CypherQueryContext(elementType, _loggerFactory, _graphContext.SchemaRegistry);
         var visitor = new AgeCypherQueryVisitor(context);
         
         try
@@ -241,6 +247,12 @@ internal sealed class AgeCypherEngine
                 return "Single";
             }
             
+            // Check for ToDictionary markers
+            if (methodName == "ToDictionaryAsync" || methodName == "ToDictionaryAsyncMarker")
+            {
+                return "ToDictionary";
+            }
+            
             if (methodCall.Arguments.Count > 0)
             {
                 current = methodCall.Arguments[0];
@@ -252,6 +264,83 @@ internal sealed class AgeCypherEngine
         }
         
         return null;
+    }
+
+    private async Task<T?> ExecuteToDictionaryAsync<T>(Expression expression, AgeGraphTransaction? transaction, CancellationToken cancellationToken)
+    {
+        // The expression is: ToDictionaryAsyncMarker(source.Expression, keySelector)
+        // We need to:
+        // 1. Extract the source expression and keySelector
+        // 2. Execute the source as List<TSource>
+        // 3. Build Dictionary<TKey, TSource> using the keySelector
+        if (expression is not MethodCallExpression toDictCall || toDictCall.Arguments.Count < 2)
+            throw new InvalidOperationException("Expected ToDictionaryAsyncMarker call with source and keySelector");
+
+        var sourceExpression = toDictCall.Arguments[0];
+        var keySelectorArg = toDictCall.Arguments[1];
+
+        // Extract the keySelector lambda
+        LambdaExpression keySelectorLambda;
+        if (keySelectorArg is UnaryExpression { NodeType: ExpressionType.Quote } quote)
+            keySelectorLambda = (LambdaExpression)quote.Operand;
+        else
+            keySelectorLambda = (LambdaExpression)keySelectorArg;
+
+        // Extract source element type from the queryable
+        var sourceElementType = ExtractElementTypeFromExpression(sourceExpression) ?? typeof(object);
+
+        // Execute the underlying query as List<TSourceElement>
+        var listMethod = GetType().GetMethod(nameof(ExecuteAsListAsync),
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        if (listMethod == null)
+            throw new InvalidOperationException("Could not find ExecuteAsListAsync method");
+
+        var genericListMethod = listMethod.MakeGenericMethod(sourceElementType);
+        var listTask = (Task)genericListMethod.Invoke(this, [sourceExpression, transaction, cancellationToken])!;
+        await listTask.ConfigureAwait(false);
+
+        // Get the result list via reflection
+        var resultProperty = listTask.GetType().GetProperty("Result");
+        var sourceList = (System.Collections.IEnumerable)resultProperty!.GetValue(listTask)!;
+
+        // Build dictionary from the list using the compiled key selector
+        var keySelectorFunc = keySelectorLambda.Compile();
+        var dictType = typeof(Dictionary<,>).MakeGenericType(keySelectorLambda.ReturnType, sourceElementType);
+        var dict = (System.Collections.IDictionary)Activator.CreateInstance(dictType)!;
+
+        foreach (var item in sourceList)
+        {
+            var key = keySelectorFunc.DynamicInvoke(item);
+            dict.Add(key!, item);
+        }
+
+        return (T?)dict;
+    }
+
+    private async Task<List<TElement>> ExecuteAsListAsync<TElement>(
+        Expression sourceExpression, AgeGraphTransaction? transaction, CancellationToken cancellationToken)
+    {
+        // Build a fresh query from the source expression
+        var (cypher, parameters) = BuildCypherQuery(typeof(TElement), sourceExpression);
+
+        _logger.LogDebug("ToDictionary source Cypher: {Cypher}", cypher);
+
+        // Execute and materialize as list
+        var entityInfos = await ExecuteRawQueryAsync(
+            cypher, parameters, typeof(TElement), transaction, cancellationToken);
+
+        var materialized = await _sharedMaterializer.MaterializeAsync<List<TElement>>(entityInfos, cancellationToken);
+        return materialized ?? [];
+    }
+
+    private async Task<List<EntityInfo>> ExecuteRawQueryAsync(
+        string cypher, Dictionary<string, object?> parameters, Type elementType,
+        AgeGraphTransaction? transaction, CancellationToken cancellationToken)
+    {
+        var command = _graphContext.Connection.CreateCypherCommand(_graphContext.GraphName, cypher, parameters);
+        command.Transaction = transaction?.Transaction;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return await _ageResultProcessor.ProcessAsync(reader, elementType, cancellationToken);
     }
 
     private (bool hasProjection, LambdaExpression? projectionExpression, Type sourceElementType) DetectProjection(Expression expression)

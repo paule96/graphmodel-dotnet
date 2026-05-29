@@ -162,6 +162,9 @@ public sealed class ResultMaterializer<TValueConverter>
                     var matchingProperty = FindPropertyInEntityInfo(entityInfo, paramName);
                     values[i] = matchingProperty?.Value switch
                     {
+                        SimpleValue simpleVal when param.ParameterType.IsGenericType &&
+                            param.ParameterType.GetGenericTypeDefinition() == typeof(List<>) =>
+                            MaterializeListProperty(simpleVal, param.ParameterType),
                         SimpleValue => ConvertPropertyToParameterType(matchingProperty, param.ParameterType),
                         EntityInfo complexEntityInfo => MaterializeSingleElement<object>(complexEntityInfo, param.ParameterType),
                         _ => param.HasDefaultValue ? param.DefaultValue : GetDefaultValue(param.ParameterType)
@@ -191,8 +194,19 @@ public sealed class ResultMaterializer<TValueConverter>
             var paramName = param.Name ?? $"param{i}";
             var matchingProperty = FindPropertyInEntityInfo(entityInfo, paramName);
 
-            if (matchingProperty?.Value is SimpleValue)
-                values[i] = ConvertPropertyToParameterType(matchingProperty, param.ParameterType);
+            if (matchingProperty?.Value is SimpleValue simpleVal)
+            {
+                // Check for List<T> properties (from collect() results)
+                if (param.ParameterType.IsGenericType &&
+                    param.ParameterType.GetGenericTypeDefinition() == typeof(List<>))
+                {
+                    values[i] = MaterializeListProperty(simpleVal, param.ParameterType);
+                }
+                else
+                {
+                    values[i] = ConvertPropertyToParameterType(matchingProperty, param.ParameterType);
+                }
+            }
             else if (matchingProperty?.Value is EntityInfo complexEntityInfo)
                 values[i] = typeof(INode).IsAssignableFrom(param.ParameterType)
                     ? _entityFactory.Deserialize(complexEntityInfo)
@@ -202,6 +216,57 @@ public sealed class ResultMaterializer<TValueConverter>
         }
 
         return constructor.Invoke(values);
+    }
+
+    /// <summary>
+    /// Materializes a List<T> property from a SimpleValue that contains a raw list
+    /// of values (produced by collect() in AGE queries).
+    /// Each element may be an EntityInfo (for map projections) or a scalar value.
+    /// </summary>
+    private object? MaterializeListProperty(SimpleValue simpleValue, Type listType)
+    {
+        var elementType = listType.GetGenericArguments()[0];
+
+        if (simpleValue.Object is not System.Collections.IList rawList)
+            return GetDefaultValue(listType);
+
+        if (rawList.Count == 0)
+        {
+            var emptyListType = typeof(List<>).MakeGenericType(elementType);
+            return Activator.CreateInstance(emptyListType);
+        }
+
+        var typedListType = typeof(List<>).MakeGenericType(elementType);
+        var typedList = (System.Collections.IList)Activator.CreateInstance(typedListType)!;
+
+        foreach (var item in rawList)
+        {
+            if (item == null)
+            {
+                typedList.Add(null);
+            }
+            else if (item is EntityInfo ei)
+            {
+                // Map projection: collect({Name: ..., Age: ...}) produces EntityInfo elements
+                var materialized = MaterializeSingleElement<object>(ei, elementType);
+                typedList.Add(materialized);
+            }
+            else
+            {
+                // Scalar projection: collect(tgt0.FirstName) produces typed scalar values
+                try
+                {
+                    var converted = Convert.ChangeType(item, elementType);
+                    typedList.Add(converted);
+                }
+                catch
+                {
+                    typedList.Add(item);
+                }
+            }
+        }
+
+        return typedList;
     }
 
     private object? ConvertPropertyToParameterType(Property property, Type parameterType)

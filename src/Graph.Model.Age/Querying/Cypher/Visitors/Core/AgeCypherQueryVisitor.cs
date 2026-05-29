@@ -507,6 +507,7 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
                 var elementType = _context.Scope.RootType;
                 var stringProperties = elementType.GetProperties()
                     .Where(p => p.PropertyType == typeof(string) && p.CanRead)
+                    .Where(p => IsIncludedInFullTextSearch(elementType, p.Name))
                     .Select(p => p.Name)
                     .ToList();
 
@@ -704,10 +705,11 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         // Get the alias set up by SetupInitialMatch
         var alias = _context.Scope.CurrentAlias ?? "src0";
 
-        // Build a WHERE condition checking all string properties using =~ for regex matching.
+        // Build a WHERE condition checking string properties with IncludeInFullTextSearch != false.
         // Apache AGE supports the =~ operator for non-case-sensitive word-boundary matching.
         var stringProperties = entityType.GetProperties()
             .Where(p => p.PropertyType == typeof(string) && p.CanRead)
+            .Where(p => IsIncludedInFullTextSearch(entityType, p.Name))
             .Select(p => p.Name)
             .ToList();
 
@@ -757,6 +759,32 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         var fragment = new WhereFragment(predicate, normalizedConsumed, currentAlias);
     _context.AddFragment(fragment);
         _logger.LogDebug("Emitted WhereFragment for alias {Alias}: {Predicate}", currentAlias, predicate);
+    }
+
+    /// <summary>
+    /// Checks whether a property should be included in full-text search queries.
+    /// If IncludeInFullTextSearch is explicitly set to false (in the SchemaRegistry),
+    /// the property is excluded.
+    /// </summary>
+    private bool IsIncludedInFullTextSearch(Type entityType, string propertyName)
+    {
+        var schemaRegistry = _context.SchemaRegistry;
+        if (schemaRegistry == null)
+            return true; // No schema available, include by default
+
+        var label = Labels.GetLabelFromType(entityType);
+        var schema = schemaRegistry.GetNodeSchema(label) 
+                  ?? schemaRegistry.GetRelationshipSchema(label) as EntitySchemaInfo;
+        if (schema?.Properties == null)
+            return true;
+
+        // Look up by C# property name (schema dictionary key)
+        if (schema.Properties.TryGetValue(propertyName, out var propSchema))
+        {
+            return propSchema.IncludeInFullTextSearch != false;
+        }
+
+        return true; // Property not in schema, include by default
     }
 
     private Expression HandleToList(MethodCallExpression node)

@@ -14,6 +14,7 @@
 
 namespace Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core;
 
+using Cvoya.Graph.Model;
 using Cvoya.Graph.Model.Cypher.Querying.Cypher.Visitors.Core;
 using Microsoft.Extensions.Logging;
 
@@ -23,12 +24,13 @@ using Microsoft.Extensions.Logging;
 /// </summary>
 internal sealed record CypherQueryContext
 {
-    public CypherQueryContext(Type rootType, ILoggerFactory? loggerFactory = null)
+    public CypherQueryContext(Type rootType, ILoggerFactory? loggerFactory = null, SchemaRegistry? schemaRegistry = null)
     {
         LoggerFactory = loggerFactory;
         Scope = new CypherQueryScope(rootType);
         ParameterStore = new QueryParameterStore(loggerFactory);
         FragmentSequence = new List<QueryFragment>();
+        SchemaRegistry = schemaRegistry;
     }
 
     public CypherQueryScope Scope { get; }
@@ -36,6 +38,8 @@ internal sealed record CypherQueryContext
     public QueryParameterStore ParameterStore { get; }
 
     public ILoggerFactory? LoggerFactory { get; }
+
+    public SchemaRegistry? SchemaRegistry { get; }
 
     public List<QueryFragment> FragmentSequence { get; }
 

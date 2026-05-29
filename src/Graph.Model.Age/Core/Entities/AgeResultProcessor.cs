@@ -164,6 +164,11 @@ internal sealed class AgeResultProcessor
             try
             {
                 var agVal = reader.GetFieldValue<Agtype>(i);
+                string agStr;
+                try { agStr = agVal.GetString() ?? agVal.ToString()!; } catch { agStr = agVal.ToString() ?? "null"; }
+                _logger.LogDebug("ReadMultiColumnRowAsync: Column {ColName} (prop {PropName}), IsVertex={IsV}, IsEdge={IsE}, AgStr={AgStr}",
+                    columnName, propertyName, agVal.IsVertex, agVal.IsEdge,
+                    agStr?.Substring(0, Math.Min(100, agStr.Length)));
 
                 if (agVal.IsVertex)
                 {
@@ -186,35 +191,99 @@ internal sealed class AgeResultProcessor
                     var targetType = targetProp?.PropertyType ?? typeof(string);
                     object? convertedValue = null;
 
-                    // Try Agtype typed accessors first
-                    try
+                    // Check for Agtype list/array (from collect() expressions)
+                    if (targetType.IsGenericType &&
+                        (targetType.GetGenericTypeDefinition() == typeof(List<>) ||
+                         targetType.GetGenericTypeDefinition() == typeof(IList<>) ||
+                         targetType.GetGenericTypeDefinition() == typeof(IReadOnlyList<>)))
                     {
-                        if (targetType == typeof(string)) { convertedValue = agVal.GetString(); }
-                        else if (targetType == typeof(int) || targetType == typeof(int?)) { convertedValue = agVal.GetInt32(); }
-                        else if (targetType == typeof(long) || targetType == typeof(long?)) { convertedValue = agVal.GetInt64(); }
-                        else if (targetType == typeof(double) || targetType == typeof(double?)) { convertedValue = agVal.GetDouble(); }
-                        else if (targetType == typeof(float) || targetType == typeof(float?)) { convertedValue = agVal.GetFloat(); }
-                        else if (targetType == typeof(decimal) || targetType == typeof(decimal?)) { convertedValue = agVal.GetDecimal(); }
-                        else if (targetType == typeof(bool) || targetType == typeof(bool?)) { convertedValue = agVal.GetBoolean(); }
-                        else if (targetType == typeof(DateTime) || targetType == typeof(DateTime?))
+                        var listElementType = targetType.GetGenericArguments()[0];
+                        try
                         {
-                            var strVal = agVal.ToString()?.Trim('"', ' ', '\'');
-                            DateTime dtVal;
-                            var parsed = DateTime.TryParse(strVal, System.Globalization.CultureInfo.InvariantCulture,
-                                System.Globalization.DateTimeStyles.RoundtripKind, out dtVal)
-                                || DateTime.TryParseExact(strVal,
-                                    ["yyyy-MM-ddTHH:mm:ss.FFFFFFF", "yyyy-MM-ddTHH:mm:ss", "yyyy-MM-dd",
-                                     "yyyy-MM-dd HH:mm:ss.FFFFFFF", "yyyy-MM-dd HH:mm:ss"],
-                                    System.Globalization.CultureInfo.InvariantCulture,
-                                    System.Globalization.DateTimeStyles.RoundtripKind, out dtVal);
-                            if (parsed)
-                                convertedValue = dtVal.Kind == DateTimeKind.Unspecified
-                                    ? DateTime.SpecifyKind(dtVal, DateTimeKind.Local) : dtVal;
+                            var agList = agVal.GetList();
+                            if (agList != null && agList.Count > 0)
+                            {
+                                _logger.LogDebug("ReadMultiColumnRowAsync: Got list for {Prop} with {Count} elements. Element types: {Types}",
+                                    propertyName, agList.Count,
+                                    string.Join(", ", agList.Take(3).Select(e => $"{e?.GetType().Name ?? "null"}({e?.ToString()?.Substring(0, Math.Min(50, e?.ToString()?.Length ?? 0))})")));
+                                var typedList = new List<object?>();
+                                foreach (var rawElem in agList)
+                                {
+                                    // GetList() may return raw objects, Agtype wrappers, or JsonElement objects.
+                                    object? elemObj = null;
+                                    if (rawElem is Agtype agElem)
+                                    {
+                                        elemObj = ConvertSingleAgtypeElement(agElem, listElementType);
+                                    }
+                                    else if (rawElem is System.Text.Json.JsonElement jsonElem)
+                                    {
+                                        // AGE returns collect() element maps as JsonElement values
+                                        elemObj = ConvertJsonElementToEntityInfo(jsonElem, listElementType);
+                                    }
+                                    else if (rawElem != null)
+                                    {
+                                        // Wrap in Agtype to use UnifiedAgtypeValue for access
+                                        try
+                                        {
+                                            var wrapObj = new Agtype(rawElem.ToString()!);
+                                            elemObj = ConvertSingleAgtypeElement(wrapObj, listElementType);
+                                        }
+                                        catch (Exception wrapEx)
+                                        {
+                                            _logger.LogWarning(wrapEx, "ReadMultiColumnRowAsync: Failed to wrap Agtype list element for {Prop}, raw type={RawType}", propertyName, rawElem.GetType().Name);
+                                            // Fall back to string conversion
+                                            elemObj = ConvertScalarAgtype(rawElem.ToString() ?? string.Empty, listElementType);
+                                        }
+                                    }
+                                    typedList.Add(elemObj);
+                                }
+                                convertedValue = typedList;
+                            }
+                            else
+                            {
+                                // Empty list — create empty typed list
+                                var listType = typeof(List<>).MakeGenericType(listElementType);
+                                convertedValue = Activator.CreateInstance(listType);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "Failed to parse Agtype list for property {Property}", propertyName);
                         }
                     }
-                    catch
+
+                    if (convertedValue == null)
                     {
-                        // Typed accessor failed — fall back below
+                        // Try Agtype typed accessors first
+                        try
+                        {
+                            if (targetType == typeof(string)) { convertedValue = agVal.GetString(); }
+                            else if (targetType == typeof(int) || targetType == typeof(int?)) { convertedValue = agVal.GetInt32(); }
+                            else if (targetType == typeof(long) || targetType == typeof(long?)) { convertedValue = agVal.GetInt64(); }
+                            else if (targetType == typeof(double) || targetType == typeof(double?)) { convertedValue = agVal.GetDouble(); }
+                            else if (targetType == typeof(float) || targetType == typeof(float?)) { convertedValue = agVal.GetFloat(); }
+                            else if (targetType == typeof(decimal) || targetType == typeof(decimal?)) { convertedValue = agVal.GetDecimal(); }
+                            else if (targetType == typeof(bool) || targetType == typeof(bool?)) { convertedValue = agVal.GetBoolean(); }
+                            else if (targetType == typeof(DateTime) || targetType == typeof(DateTime?))
+                            {
+                                var strVal = agVal.ToString()?.Trim('"', ' ', '\'');
+                                DateTime dtVal;
+                                var parsed = DateTime.TryParse(strVal, System.Globalization.CultureInfo.InvariantCulture,
+                                    System.Globalization.DateTimeStyles.RoundtripKind, out dtVal)
+                                    || DateTime.TryParseExact(strVal,
+                                        ["yyyy-MM-ddTHH:mm:ss.FFFFFFF", "yyyy-MM-ddTHH:mm:ss", "yyyy-MM-dd",
+                                         "yyyy-MM-dd HH:mm:ss.FFFFFFF", "yyyy-MM-dd HH:mm:ss"],
+                                        System.Globalization.CultureInfo.InvariantCulture,
+                                        System.Globalization.DateTimeStyles.RoundtripKind, out dtVal);
+                                if (parsed)
+                                    convertedValue = dtVal.Kind == DateTimeKind.Unspecified
+                                        ? DateTime.SpecifyKind(dtVal, DateTimeKind.Local) : dtVal;
+                            }
+                        }
+                        catch
+                        {
+                            // Typed accessor failed — fall back below
+                        }
                     }
 
                     // If typed accessor didn't produce a value, try getting as string and converting
@@ -233,9 +302,10 @@ internal sealed class AgeResultProcessor
                             new SimpleValue(convertedValue, convertedValue.GetType()));
                 }
             }
-            catch
+            catch (Exception ex)
             {
                 // Skip columns that can't be read
+                _logger.LogWarning(ex, "ReadMultiColumnRowAsync: Failed to read column {ColumnName} (property {PropertyName})", columnName, propertyName);
             }
         }
 
@@ -313,5 +383,181 @@ internal sealed class AgeResultProcessor
         if (targetType == typeof(bool) && bool.TryParse(agTypeStr, out var boolVal)) return boolVal;
         if (targetType == typeof(DateTime) && DateTime.TryParse(agTypeStr, out var dtVal)) return dtVal;
         return agTypeStr;
+    }
+
+    /// <summary>
+    /// Converts a single Agtype element from a collect() list to a typed .NET value.
+    /// For Agtype maps (from collect({...})), creates an EntityInfo from the map properties.
+    /// For scalar values, uses typed accessors.
+    /// </summary>
+    private static object? ConvertSingleAgtypeElement(Agtype elem, Type targetType)
+    {
+        // If the element is a vertex or edge, return the full object
+        if (elem.IsVertex)
+        {
+            try { return elem.GetVertex(); } catch { }
+        }
+        if (elem.IsEdge)
+        {
+            try { return elem.GetEdge(); } catch { }
+        }
+
+        // Try typed accessors for scalars
+        if (targetType == typeof(string))
+        {
+            try { return elem.GetString(); } catch { return elem.ToString()?.Trim('"'); }
+        }
+        if (targetType == typeof(int)) { try { return elem.GetInt32(); } catch { } }
+        if (targetType == typeof(long)) { try { return elem.GetInt64(); } catch { } }
+        if (targetType == typeof(double)) { try { return elem.GetDouble(); } catch { } }
+        if (targetType == typeof(float)) { try { return elem.GetFloat(); } catch { } }
+        if (targetType == typeof(decimal)) { try { return elem.GetDecimal(); } catch { } }
+        if (targetType == typeof(bool)) { try { return elem.GetBoolean(); } catch { } }
+        if (targetType == typeof(DateTime))
+        {
+            try
+            {
+                var strVal = (elem.GetString() ?? elem.ToString())?.Trim('"', ' ', '\'');
+                if (DateTime.TryParse(strVal, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
+                    return dt;
+            }
+            catch { }
+        }
+
+        // Handle Agtype maps (from collect({key: value, ...}))
+        // Check if this is a map-like Agtype object by examining its string representation
+        try
+        {
+            var strVal = elem.GetString();
+            if (!string.IsNullOrEmpty(strVal))
+            {
+                // Try to parse as JSON map
+                var trimmed = strVal.Trim();
+                if (trimmed.StartsWith("{"))
+                {
+                    return ConvertAgtypeMapToEntityInfo(elem, targetType);
+                }
+            }
+        }
+        catch { }
+
+        // Try ToString representation for map detection
+        try
+        {
+            var strVal = elem.ToString()?.Trim();
+            if (!string.IsNullOrEmpty(strVal) && strVal.StartsWith("{"))
+            {
+                return ConvertAgtypeMapToEntityInfo(elem, targetType);
+            }
+        }
+        catch { }
+
+        // Fallback: convert via string
+        return ConvertScalarAgtype(elem.ToString() ?? string.Empty, targetType);
+    }
+
+    /// <summary>
+    /// Converts an Agtype map (from collect({...})) to an EntityInfo with simple properties
+    /// matching the map keys. This enables the ResultMaterializer to hydrate anonymous types.
+    /// </summary>
+    private static EntityInfo ConvertAgtypeMapToEntityInfo(Agtype map, Type targetType)
+    {
+        var simpleProps = new Dictionary<string, Property>(StringComparer.Ordinal);
+        var complexProps = new Dictionary<string, Property>(StringComparer.Ordinal);
+
+        // Parse the JSON representation of the Agtype map
+        var json = map.ToString();
+        if (string.IsNullOrEmpty(json) || !json.StartsWith("{"))
+            return new EntityInfo(targetType, string.Empty, Array.Empty<string>(), simpleProps, complexProps);
+
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            
+            // Determine the target type for each property from the anonymous type
+            var targetProps = targetType.GetProperties()
+                .ToDictionary(p => p.Name, p => p.PropertyType, StringComparer.Ordinal);
+
+            foreach (var prop in root.EnumerateObject())
+            {
+                var propName = prop.Name;
+                var targetPropType = targetProps.TryGetValue(propName, out var tpt) ? tpt : typeof(string);
+                
+                object? value = prop.Value.ValueKind switch
+                {
+                    System.Text.Json.JsonValueKind.String => prop.Value.GetString(),
+                    System.Text.Json.JsonValueKind.Number => ConvertJsonNumber(prop.Value, targetPropType),
+                    System.Text.Json.JsonValueKind.True => true,
+                    System.Text.Json.JsonValueKind.False => false,
+                    System.Text.Json.JsonValueKind.Null => null,
+                    _ => prop.Value.GetRawText()
+                };
+
+                if (value != null)
+                {
+                    simpleProps[propName] = new Property(null!, propName, false,
+                        new SimpleValue(value, value.GetType()));
+                }
+            }
+        }
+        catch
+        {
+            // If JSON parsing fails, return empty entity info
+        }
+
+        return new EntityInfo(targetType, string.Empty, Array.Empty<string>(), simpleProps, complexProps);
+    }
+
+    /// <summary>
+    /// Converts a JsonElement (from collect() list) into an EntityInfo for materialization.
+    /// Handles map objects like {"FriendName": "Bob", "FriendAge": 25}.
+    /// </summary>
+    private static EntityInfo ConvertJsonElementToEntityInfo(System.Text.Json.JsonElement elem, Type targetType)
+    {
+        var simpleProps = new Dictionary<string, Property>(StringComparer.Ordinal);
+        var targetProps = targetType.GetProperties()
+            .ToDictionary(p => p.Name, p => p.PropertyType, StringComparer.Ordinal);
+
+        foreach (var prop in elem.EnumerateObject())
+        {
+            var propName = prop.Name;
+            var targetPropType = targetProps.TryGetValue(propName, out var tpt) ? tpt : typeof(string);
+
+            object? value = prop.Value.ValueKind switch
+            {
+                System.Text.Json.JsonValueKind.String => prop.Value.GetString(),
+                System.Text.Json.JsonValueKind.Number => ConvertJsonNumber(prop.Value, targetPropType),
+                System.Text.Json.JsonValueKind.True => true,
+                System.Text.Json.JsonValueKind.False => false,
+                System.Text.Json.JsonValueKind.Null => null,
+                _ => prop.Value.GetRawText()
+            };
+
+            if (value != null)
+            {
+                simpleProps[propName] = new Property(null!, propName, false,
+                    new SimpleValue(value, value.GetType()));
+            }
+        }
+
+        return new EntityInfo(targetType, string.Empty, Array.Empty<string>(), simpleProps,
+            new Dictionary<string, Property>(StringComparer.Ordinal));
+    }
+
+    private static object? ConvertJsonNumber(System.Text.Json.JsonElement elem, Type targetType)
+    {
+        if (targetType == typeof(int) || targetType == typeof(int?))
+            return elem.TryGetInt32(out var i) ? i : (int)elem.GetDouble();
+        if (targetType == typeof(long) || targetType == typeof(long?))
+            return elem.TryGetInt64(out var l) ? l : (long)elem.GetDouble();
+        if (targetType == typeof(double) || targetType == typeof(double?))
+            return elem.GetDouble();
+        if (targetType == typeof(float) || targetType == typeof(float?))
+            return (float)elem.GetDouble();
+        if (targetType == typeof(decimal) || targetType == typeof(decimal?))
+            return elem.GetDecimal();
+        return elem.GetDouble();
     }
 }

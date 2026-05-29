@@ -352,11 +352,34 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
             }
             
             // If we found a parameter at the base, construct the nested property path
-            if (baseExpression is ParameterExpression)
+            if (baseExpression is ParameterExpression bpExpr)
             {
-                var fullPath = $"{_alias}.{string.Join(".", propertyPath)}";
-                _logger.LogDebug("Mapped nested property access to {Path}", fullPath);
-                return Expression.Constant(fullPath);
+                // Special handling for IGrouping parameters (e.g., group.Key.FirstName)
+                if (bpExpr.Type.IsGenericType && bpExpr.Type.GetGenericTypeDefinition().Name.Contains("IGrouping"))
+                {
+                    // The first property path element should be "Key"
+                    // Map group.Key to the GROUP BY expression, then append remaining properties
+                    if (propertyPath.Count > 0 && propertyPath[0] == "Key")
+                    {
+                        var groupByFragment = _context.FragmentSequence.OfType<GroupByFragment>().LastOrDefault();
+                        if (groupByFragment == null)
+                            throw new InvalidOperationException("GroupBy fragment not found for IGrouping.Key access");
+
+                        var resolvedKey = groupByFragment.Expression;
+                        var remainingPath = propertyPath.Skip(1).ToList();
+                        var resolvedPath = remainingPath.Count > 0
+                            ? $"{resolvedKey}.{string.Join(".", remainingPath)}"
+                            : resolvedKey;
+                        _logger.LogDebug("Mapped IGrouping chain access to {Path}", resolvedPath);
+                        return Expression.Constant(resolvedPath);
+                    }
+                    
+                    throw new NotSupportedException($"IGrouping property '{propertyPath.FirstOrDefault()}' is not supported. Use group.Key");
+                }
+
+                var fp = $"{_alias}.{string.Join(".", propertyPath)}";
+                _logger.LogDebug("Mapped nested property access to {Path}", fp);
+                return Expression.Constant(fp);
             }
         }
 
@@ -414,16 +437,41 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
             return HandleDateTimeMethod(node);
         }
 
-        // Handle LINQ Count method
+        // Handle closure-captured IEnumerable<IRelationship>.Count(lambda) patterns FIRST
+        // Must be before the generic HandleCountMethod which would intercept all Count calls
         if (node.Method.Name == "Count")
         {
+            if (TryHandleClosureCountOnRelationship(node))
+                return Expression.Constant(HandleClosureCountOnRelationship(node));
             return HandleCountMethod(node);
+        }
+
+        // Handle IGrouping aggregation: group.Average/Max/Min/Sum(lambda)
+        if ((node.Method.Name == "Average" || node.Method.Name == "Max" ||
+             node.Method.Name == "Min" || node.Method.Name == "Sum")
+            && node.Arguments.Count >= 1)
+        {
+            return HandleGroupingAggregation(node, node.Method.Name.ToLowerInvariant());
         }
 
         // Handle collection methods (Contains, Any, etc.) - but not string.Contains
         if (node.Method.Name == "Contains" && node.Arguments.Count >= 1 && node.Method.DeclaringType != typeof(string))
         {
             return HandleContainsMethod(node);
+        }
+
+        // Handle .ToList() on nested Select expressions from GroupBy results
+        // Pattern: group.Select(p => new { ... }).ToList() → collect({...})
+        if (node.Method.Name == "ToList" && node.Arguments.Count == 1)
+        {
+            try
+            {
+                return HandleToListOnNestedSelect(node);
+            }
+            catch
+            {
+                // Fall through to compile-time evaluation
+            }
         }
 
         // For any other method call, try to evaluate it at compile time
@@ -938,6 +986,606 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
     }
 
     /// <summary>
+    /// Handles group.Average/Max/Min/Sum(lambda) on IGrouping parameters.
+    /// Translates to Cypher aggregation functions like avg(tgt0.Age).
+    /// </summary>
+    private Expression HandleGroupingAggregation(MethodCallExpression node, string aggFn)
+    {
+        var source = node.Object ?? (node.Arguments.Count >= 2 ? node.Arguments[0] : null);
+        if (source is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } conv)
+            source = conv.Operand;
+        var isGrouping = source is ParameterExpression param &&
+            param.Type.IsGenericType &&
+            param.Type.GetGenericTypeDefinition().Name.Contains("IGrouping");
+        if (!isGrouping) return Expression.Constant($"{aggFn}(*)");
+        var lambdaIdx = node.Arguments.Count >= 2 ? 1 : 0;
+        if (lambdaIdx >= node.Arguments.Count) return Expression.Constant($"{aggFn}(*)");
+        var lambdaArg = node.Arguments[lambdaIdx];
+        if (lambdaArg is UnaryExpression { NodeType: ExpressionType.Quote } quote)
+            lambdaArg = quote.Operand;
+        if (lambdaArg is not LambdaExpression lambda)
+            return Expression.Constant($"{aggFn}(*)");
+        // Map .NET aggregation names to AGE Cypher function names
+        var ageFn = aggFn switch
+        {
+            "average" => "avg",
+            _ => aggFn
+        };
+        var typedExpr = Visit(lambda.Body);
+        string cypherExpr = (typedExpr is ConstantExpression constExpr)
+            ? (constExpr.Value?.ToString() ?? "*")
+            : "*";
+        _logger.LogDebug("IGrouping.{Agg}(lambda) -> {Fn}({Expr})",
+            node.Method.Name, aggFn, cypherExpr);
+        return Expression.Constant($"{ageFn}({cypherExpr})");
+    }
+
+    /// <summary>
+    /// Handles .ToList() on nested Select expressions from GroupBy results.
+    /// Pattern: group.Select(p => new { Foo = p.EndNode.FirstName }).ToList()
+    /// Translates to: collect({Foo: tgt0.FirstName})
+    /// Uses top-down expression tree walking to avoid the visitor's inside-out ConstantExpression issue.
+    /// </summary>
+    private Expression HandleToListOnNestedSelect(MethodCallExpression node)
+    {
+        var selectSource = node.Arguments[0];
+
+        if (selectSource is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } ue)
+            selectSource = ue.Operand;
+
+        if (selectSource is not MethodCallExpression selectCall ||
+            selectCall.Method.Name != "Select" ||
+            selectCall.Arguments.Count < 2)
+        {
+            throw new InvalidOperationException("ToList source is not a Select call");
+        }
+
+        var groupSource = selectCall.Arguments[0];
+        if (groupSource is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } gsConvert)
+            groupSource = gsConvert.Operand;
+
+        if (groupSource is ParameterExpression groupParam &&
+            groupParam.Type.IsGenericType &&
+            groupParam.Type.GetGenericTypeDefinition().Name.Contains("IGrouping"))
+        {
+            var lambdaArg = selectCall.Arguments[1];
+            if (lambdaArg is UnaryExpression { NodeType: ExpressionType.Quote } quote)
+                lambdaArg = quote.Operand;
+            var innerLambda = (LambdaExpression)lambdaArg;
+            var innerParam = innerLambda.Parameters[0]; // e.g., "p" of type IGraphPathSegment
+
+            // Use top-down walking — resolves p.EndNode.FirstName → tgt0.FirstName directly
+            string collectExpr = TranslateForCollect(innerLambda.Body, innerParam);
+
+            _logger.LogDebug("Translated group.Select().ToList() to collect({Expr})", collectExpr);
+            return Expression.Constant($"collect({collectExpr})");
+        }
+
+        throw new InvalidOperationException("ToList source Select is not on an IGrouping");
+    }
+
+    /// <summary>
+    /// Top-down translation of a Select lambda body to a Cypher expression for collect().
+    /// Handles NewExpression (anonymous types), MemberExpression (property chains),
+    /// BinaryExpression (arithmetic), MethodCallExpression (.Days, .Subtract), etc.
+    /// Unlike VisitAndReturnCypher, this walks the tree top-down to correctly resolve
+    /// path segment chains like p.EndNode.FirstName → tgt0.FirstName.
+    /// </summary>
+    private string TranslateForCollect(Expression body, ParameterExpression param)
+    {
+        if (body is NewExpression newExpr)
+        {
+            var parts = new List<string>();
+            for (int i = 0; i < newExpr.Arguments.Count; i++)
+            {
+                var name = newExpr.Members?[i]?.Name ?? $"Prop{i}";
+                var val = TranslateExpressionForCollect(newExpr.Arguments[i], param);
+                parts.Add($"{name}: {val}");
+            }
+            return $"{{{string.Join(", ", parts)}}}";
+        }
+
+        if (body is MemberExpression)
+            return TranslateExpressionForCollect(body, param);
+
+        if (body is BinaryExpression)
+            return TranslateExpressionForCollect(body, param);
+
+        if (body is MethodCallExpression)
+            return TranslateExpressionForCollect(body, param);
+
+        // Fallback: try to evaluate as constant
+        try
+        {
+            var lambda = Expression.Lambda<Func<object>>(Expression.Convert(body, typeof(object)));
+            var val = lambda.Compile()();
+            return val?.ToString() ?? "null";
+        }
+        catch
+        {
+            return body.ToString() ?? "unknown";
+        }
+    }
+
+    /// <summary>
+    /// Top-down translation of a single expression within an inner Select lambda.
+    /// Resolves path segment property chains (e.g., p.EndNode.FirstName → tgt0.FirstName),
+    /// arithmetic, method calls, DateTime static members, and constants.
+    /// </summary>
+    private string TranslateExpressionForCollect(Expression expr, ParameterExpression param)
+    {
+        // Member access — could be p.EndNode.FirstName or p.EndNode or DateTime.UtcNow
+        if (expr is MemberExpression mem)
+        {
+            // Static member? (e.g., DateTime.UtcNow) — evaluate at compile time
+            if (mem.Expression == null)
+            {
+                try
+                {
+                    var lambda = Expression.Lambda<Func<object>>(Expression.Convert(mem, typeof(object)));
+                    var val = lambda.Compile()();
+                    return val switch
+                    {
+                        DateTime dt => $"'{dt:yyyy-MM-ddTHH:mm:ss}'",
+                        _ => val?.ToString() ?? "null"
+                    };
+                }
+                catch { return TryCompileEval(expr); }
+            }
+
+            // Walk the member chain to find the base
+            var chain = new List<string>();
+            Expression? current = mem;
+            while (current is MemberExpression cm)
+            {
+                chain.Insert(0, MapPropertyName(cm.Member.Name));
+                current = cm.Expression;
+            }
+
+            // Check if base is param (path segment) or a path segment component
+            if (current == param && typeof(IGraphPathSegment).IsAssignableFrom(param.Type))
+            {
+                // chain = ["EndNode", "FirstName"] → resolve EndNode to alias, keep rest
+                // chain = ["EndNode"] → just the alias
+                if (chain.Count > 0)
+                {
+                    var component = chain[0];
+                    var alias = component switch
+                    {
+                        "StartNode" => _sourceAlias ?? "src0",
+                        "EndNode" => _targetAlias ?? "tgt0",
+                        "Relationship" => _relationshipAlias ?? "r0",
+                        _ => _alias ?? "src0"
+                    };
+
+                    if (chain.Count == 1)
+                        return alias;
+
+                    return $"{alias}.{string.Join(".", chain.Skip(1))}";
+                }
+                return _targetAlias ?? "tgt0";
+            }
+
+            // Check for path segment chain: param.PathProp.NodeProp (e.g., p.EndNode.FirstName)
+            // where chain might be ["EndNode", "FirstName"] but EndNode returns alias, FirstName is a real prop
+            if (current is MemberExpression pathPartMem && pathPartMem.Expression == param &&
+                typeof(IGraphPathSegment).IsAssignableFrom(param.Type))
+            {
+                var pathPart = MapPropertyName(pathPartMem.Member.Name);
+                var alias = pathPart switch
+                {
+                    "StartNode" => _sourceAlias ?? "src0",
+                    "EndNode" => _targetAlias ?? "tgt0",
+                    "Relationship" => _relationshipAlias ?? "r0",
+                    _ => _alias ?? "src0"
+                };
+
+                // chain[0] is the path part (already resolved to alias)
+                // The rest are property names on that alias
+                if (chain.Count > 1)
+                    return $"{alias}.{string.Join(".", chain.Skip(1))}";
+                return alias;
+            }
+
+            // Not a path segment — the member may be on a non-param sub-expression
+            // (e.g., (DateTime.UtcNow - p.Relationship.Since).Days)
+            // Recursively translate the inner expression, then append the property
+            var innerExpr = mem.Expression;
+            if (innerExpr is BinaryExpression || innerExpr is MethodCallExpression ||
+                innerExpr is UnaryExpression || innerExpr is ConditionalExpression)
+            {
+                var baseCypher = TranslateExpressionForCollect(innerExpr, param);
+                var prop = MapPropertyName(mem.Member.Name);
+
+                // Handle TimeSpan properties
+                if (mem.Member.DeclaringType == typeof(TimeSpan))
+                {
+                    try
+                    {
+                        var evalLambda = Expression.Lambda<Func<object>>(Expression.Convert(expr, typeof(object)));
+                        var val = evalLambda.Compile()();
+                        return val?.ToString() ?? "0";
+                    }
+                    catch
+                    {
+                        return mem.Member.Name switch
+                        {
+                            "Days" => $"toInteger({baseCypher} / 86400000)",
+                            "Hours" => $"toInteger({baseCypher} / 3600000)",
+                            "Minutes" => $"toInteger({baseCypher} / 60000)",
+                            "Seconds" => $"toInteger({baseCypher} / 1000)",
+                            _ => $"{baseCypher}.{prop}"
+                        };
+                    }
+                }
+
+                return $"{baseCypher}.{prop}";
+            }
+
+            // Handle member access on a non-path-segment parameter (e.g., p.FirstName where p is Person)
+            if (mem.Expression == param && typeof(INode).IsAssignableFrom(param.Type))
+            {
+                var nonPathAlias = _targetAlias ?? _alias ?? "src0";
+                return $"{nonPathAlias}.{MapPropertyName(mem.Member.Name)}";
+            }
+
+            // Not a path segment — try constant eval
+            try
+            {
+                var lambda = Expression.Lambda<Func<object>>(Expression.Convert(expr, typeof(object)));
+                var val = lambda.Compile()();
+                return val?.ToString() ?? "null";
+            }
+            catch { return expr.ToString() ?? "unknown"; }
+        }
+
+        // Binary arithmetic
+        if (expr is BinaryExpression bin)
+        {
+            var left = TranslateExpressionForCollect(bin.Left, param);
+            var right = TranslateExpressionForCollect(bin.Right, param);
+            var op = bin.NodeType switch
+            {
+                ExpressionType.Add => "+",
+                ExpressionType.Subtract => "-",
+                ExpressionType.Multiply => "*",
+                ExpressionType.Divide => "/",
+                ExpressionType.AndAlso => "AND",
+                ExpressionType.OrElse => "OR",
+                ExpressionType.Equal => "=",
+                ExpressionType.NotEqual => "<>",
+                ExpressionType.GreaterThan => ">",
+                ExpressionType.GreaterThanOrEqual => ">=",
+                ExpressionType.LessThan => "<",
+                ExpressionType.LessThanOrEqual => "<=",
+                _ => throw new NotSupportedException($"Binary operator {bin.NodeType} in inner expression")
+            };
+            return $"({left} {op} {right})";
+        }
+
+        // Unary (Convert)
+        if (expr is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } un)
+            return TranslateExpressionForCollect(un.Operand, param);
+
+        // NOT
+        if (expr is UnaryExpression { NodeType: ExpressionType.Not } notExpr)
+            return $"NOT ({TranslateExpressionForCollect(notExpr.Operand, param)})";
+
+        // Conditional (ternary)
+        if (expr is ConditionalExpression cond)
+        {
+            var test = TranslateExpressionForCollect(cond.Test, param);
+            var ifTrue = TranslateExpressionForCollect(cond.IfTrue, param);
+            var ifFalse = TranslateExpressionForCollect(cond.IfFalse, param);
+            return $"CASE WHEN {test} THEN {ifTrue} ELSE {ifFalse} END";
+        }
+
+        // Constant
+        if (expr is ConstantExpression ce)
+            return ce.Value?.ToString() ?? "null";
+
+        // Method calls
+        if (expr is MethodCallExpression mc)
+            return TranslateMethodForCollect(mc, param);
+
+        // Parameter reference (e.g., p itself in a simple Select like group.Select(p => p))
+        if (expr == param)
+            return _targetAlias ?? "tgt0";
+
+        // Fallback
+        try
+        {
+            var lambda = Expression.Lambda<Func<object>>(Expression.Convert(expr, typeof(object)));
+            var val = lambda.Compile()();
+            return val?.ToString() ?? "null";
+        }
+        catch { return expr.ToString() ?? "unknown"; }
+    }
+
+    /// <summary>
+    /// Translates a method call within a collect expression. Handles .Subtract (DateTime),
+    /// .Days (TimeSpan), .ToLower/.ToUpper/.Trim (string).
+    /// For AGE, DateTime arithmetic uses localdatetime() for Now, and durations
+    /// are computed using epoch millisecond arithmetic (toInteger((a - b) / 86400000) for Days).
+    /// </summary>
+    private string TranslateMethodForCollect(MethodCallExpression mc, ParameterExpression param)
+    {
+        // DateTime.Subtract → (expr1 - expr2) — just emit the subtraction in Cypher
+        if (mc.Method.Name == "Subtract" && mc.Method.DeclaringType == typeof(DateTime) && mc.Arguments.Count == 1 && mc.Object != null)
+        {
+            var left = TranslateExpressionForCollect(mc.Object, param);
+            var right = TranslateExpressionForCollect(mc.Arguments[0], param);
+            return $"({left} - {right})";
+        }
+
+        // TimeSpan.Days — in AGE, compute as toInteger((a - b) / 86400000) since AGE datetime
+        // subtraction returns epoch milliseconds. Use epochMs? Actually AGE's result may vary.
+        // Simpler approach: try compile-time eval first, fall back to epoch-based arithmetic.
+        if (mc.Method.Name == "get_Days" && mc.Object != null)
+        {
+            try
+            {
+                var lambda = Expression.Lambda<Func<object>>(Expression.Convert(mc, typeof(object)));
+                var val = lambda.Compile()();
+                return val?.ToString() ?? "0";
+            }
+            catch
+            {
+                // Fallback: translate the object expression and wrap in toInteger division
+                // AGE datetime subtraction produces a duration; Days = duration / milliseconds in day
+                var obj = TranslateExpressionForCollect(mc.Object, param);
+                // If the object is a subtraction of two localdatetime() expressions,
+                // AGE might produce a bigint in microseconds or milliseconds.
+                // Use toInteger on the division result.
+                return $"toInteger({obj} / 86400000)";
+            }
+        }
+
+        // String methods
+        if (mc.Method.DeclaringType == typeof(string) && mc.Object != null)
+        {
+            var obj = TranslateExpressionForCollect(mc.Object, param);
+            return mc.Method.Name switch
+            {
+                "ToLower" when mc.Arguments.Count == 0 => $"toLower({obj})",
+                "ToUpper" when mc.Arguments.Count == 0 => $"toUpper({obj})",
+                "Trim" when mc.Arguments.Count == 0 => $"trim({obj})",
+                _ => obj
+            };
+        }
+
+        // Fallback evaluation
+        try
+        {
+            var lambda = Expression.Lambda<Func<object>>(Expression.Convert(mc, typeof(object)));
+            var val = lambda.Compile()();
+            return val?.ToString() ?? "null";
+        }
+        catch { return mc.ToString() ?? "unknown"; }
+    }
+
+    /// <summary>
+    /// Tries to detect a closure-captured IEnumerable&lt;IRelationship&gt;.Count(lambda) expression
+    /// and determines if it can be translated to a Cypher size() pattern.
+    /// Returns true if the expression matches the expected pattern.
+    /// </summary>
+    private bool TryHandleClosureCountOnRelationship(MethodCallExpression node)
+    {
+        // Handle both instance (source.Count(predicate)) and static (Enumerable.Count(source, predicate)) forms
+        Expression? sourceExpr;
+        Expression? predicateExpr;
+
+        if (node.Object != null && node.Arguments.Count == 1)
+        {
+            // Instance form: allRelationships.Count(lambda)
+            sourceExpr = node.Object;
+            predicateExpr = node.Arguments[0];
+        }
+        else if (node.Object == null && node.Arguments.Count == 2)
+        {
+            // Static form: Enumerable.Count(allRelationships, lambda)
+            sourceExpr = node.Arguments[0];
+            predicateExpr = node.Arguments[1];
+        }
+        else
+        {
+            return false;
+        }
+
+        // Check that source is a MemberExpression on a closure capture
+        if (sourceExpr is not MemberExpression memberExpr)
+            return false;
+
+        // Try to evaluate the captured value
+        object? capturedValue;
+        try
+        {
+            var capturedLambda = Expression.Lambda<Func<object>>(Expression.Convert(memberExpr, typeof(object)));
+            capturedValue = capturedLambda.Compile()();
+        }
+        catch
+        {
+            return false;
+        }
+
+        // Check if it's an IEnumerable of IRelationship
+        if (capturedValue is not System.Collections.IEnumerable enumerable)
+            return false;
+
+        // Get the element type from the collection
+        var elementType = GetEnumerableElementType(capturedValue.GetType());
+        if (elementType == null || !typeof(IRelationship).IsAssignableFrom(elementType))
+            return false;
+
+        // Try to determine the relationship label from the collection elements
+        var relationshipLabel = GetRelationshipLabel(enumerable, elementType);
+        if (relationshipLabel == null)
+            return false;
+
+        // Check the lambda argument: k => k.StartNodeId == p.Id or k => k.EndNodeId == p.Id
+        var lambdaArg = predicateExpr;
+        if (lambdaArg is UnaryExpression { NodeType: ExpressionType.Quote } quote)
+            lambdaArg = quote.Operand;
+        if (lambdaArg is not LambdaExpression lambda)
+            return false;
+
+        return IsCountByNodeIdPredicate(lambda.Body);
+    }
+
+    /// <summary>
+    /// Translates a closure-captured IEnumerable&lt;IRelationship&gt;.Count(lambda) expression
+    /// to a Cypher size() pattern.
+    /// </summary>
+    private string HandleClosureCountOnRelationship(MethodCallExpression node)
+    {
+        // Determine source expression based on instance vs static form
+        Expression sourceExpr;
+        Expression predicateExpr;
+        if (node.Object != null && node.Arguments.Count == 1)
+        {
+            sourceExpr = node.Object;
+            predicateExpr = node.Arguments[0];
+        }
+        else if (node.Object == null && node.Arguments.Count == 2)
+        {
+            sourceExpr = node.Arguments[0];
+            predicateExpr = node.Arguments[1];
+        }
+        else
+        {
+            throw new NotSupportedException("Expected Count with 1 or 2 arguments on a captured collection");
+        }
+
+        // Evaluate the captured collection to determine the relationship type label
+        var captureExpr = (MemberExpression)sourceExpr;
+        var evalLambda = Expression.Lambda<Func<object>>(Expression.Convert(captureExpr, typeof(object)));
+        var capturedValue = evalLambda.Compile()();
+        var enumerable = (System.Collections.IEnumerable)capturedValue;
+        var elementType = GetEnumerableElementType(capturedValue.GetType())!;
+        var relationshipLabel = GetRelationshipLabel(enumerable, elementType)!;
+
+        // Extract the direction from the lambda
+        var lambdaArg = predicateExpr;
+        if (lambdaArg is UnaryExpression { NodeType: ExpressionType.Quote } quote)
+            lambdaArg = quote.Operand;
+        var lambda = (LambdaExpression)lambdaArg;
+
+        var direction = DetectRelationshipDirection(lambda.Body);
+
+        // Determine the current source alias from the visitor context or use default
+        var sourceAlias = _sourceAlias ?? _alias ?? "src0";
+
+        // Generate the Cypher size() expression
+        string cypherPattern;
+        if (direction == RelationshipDirection.Outgoing)
+            cypherPattern = $"({sourceAlias})-[:{relationshipLabel}]->()";
+        else if (direction == RelationshipDirection.Incoming)
+            cypherPattern = $"({sourceAlias})<-[:{relationshipLabel}]-()";
+        else
+            cypherPattern = $"({sourceAlias})-[:{relationshipLabel}]-()";
+
+        _logger.LogDebug("Translated closure .Count() to Cypher size() pattern: {Pattern}", cypherPattern);
+        return $"size({cypherPattern})";
+    }
+
+    private enum RelationshipDirection { Outgoing, Incoming, Both }
+
+    private RelationshipDirection DetectRelationshipDirection(Expression predicateBody)
+    {
+        // Look for patterns: k.StartNodeId == p.Id (outgoing) or k.EndNodeId == p.Id (incoming)
+        // Or combined: k.StartNodeId == p.Id || k.EndNodeId == p.Id (both)
+        if (predicateBody is BinaryExpression binary && binary.NodeType == ExpressionType.OrElse)
+        {
+            // Check for combined: StartNodeId == p.Id || EndNodeId == p.Id
+            return RelationshipDirection.Both;
+        }
+
+        if (predicateBody is not BinaryExpression eq || eq.NodeType != ExpressionType.Equal)
+            return RelationshipDirection.Both; // Default to both if we can't determine
+
+        // Check left side: k.StartNodeId or k.EndNodeId
+        var isStartNodeId = IsMemberAccess(eq.Left, "StartNodeId") || IsMemberAccess(eq.Right, "StartNodeId");
+        var isEndNodeId = IsMemberAccess(eq.Left, "EndNodeId") || IsMemberAccess(eq.Right, "EndNodeId");
+
+        if (isStartNodeId) return RelationshipDirection.Outgoing;
+        if (isEndNodeId) return RelationshipDirection.Incoming;
+        return RelationshipDirection.Both;
+    }
+
+    private static bool IsMemberAccess(Expression expr, string memberName)
+    {
+        if (expr is MemberExpression mem)
+            return mem.Member.Name == memberName;
+        // Handle UnaryExpression wrapping (e.g., conversions)
+        if (expr is UnaryExpression unary && (unary.NodeType == ExpressionType.Convert || unary.NodeType == ExpressionType.ConvertChecked))
+            return IsMemberAccess(unary.Operand, memberName);
+        return false;
+    }
+
+    private static bool IsCountByNodeIdPredicate(Expression predicateBody)
+    {
+        // Simple check: is it an equality comparison involving StartNodeId or EndNodeId?
+        if (predicateBody is BinaryExpression binary)
+        {
+            if (binary.NodeType == ExpressionType.Equal)
+                return IsMemberAccess(binary.Left, "StartNodeId") || IsMemberAccess(binary.Left, "EndNodeId")
+                    || IsMemberAccess(binary.Right, "StartNodeId") || IsMemberAccess(binary.Right, "EndNodeId");
+            if (binary.NodeType == ExpressionType.OrElse)
+                return IsCountByNodeIdPredicate(binary.Left) && IsCountByNodeIdPredicate(binary.Right);
+        }
+        return false;
+    }
+
+    private static Type? GetEnumerableElementType(Type type)
+    {
+        if (type.IsGenericType)
+        {
+            var genDef = type.GetGenericTypeDefinition();
+            if (genDef == typeof(List<>) || genDef == typeof(IList<>) || genDef == typeof(IEnumerable<>))
+                return type.GetGenericArguments()[0];
+        }
+
+        foreach (var iface in type.GetInterfaces())
+        {
+            if (iface.IsGenericType && iface.GetGenericTypeDefinition() == typeof(IEnumerable<>))
+                return iface.GetGenericArguments()[0];
+        }
+
+        return null;
+    }
+
+    private static string? GetRelationshipLabel(System.Collections.IEnumerable enumerable, Type elementType)
+    {
+        // Try to get the label from the first element
+        foreach (var item in enumerable)
+        {
+            if (item == null) continue;
+
+            // Use the Labels utility to get the label from the type
+            try
+            {
+                return Labels.GetLabelFromType(elementType);
+            }
+            catch
+            {
+                // Fallback: derive from type name (remove "Relationship" suffix if present)
+            }
+
+            // Fallback: derive from type name
+            var name = elementType.Name;
+            if (name.EndsWith("Relationship", StringComparison.Ordinal))
+                name = name.Substring(0, name.Length - "Relationship".Length);
+            return name;
+        }
+
+        // Empty collection — derive from type name
+        var typeName = elementType.Name;
+        if (typeName.EndsWith("Relationship", StringComparison.Ordinal))
+            typeName = typeName.Substring(0, typeName.Length - "Relationship".Length);
+        return typeName;
+    }
+
+    /// <summary>
     /// Handles parameter expressions, particularly for PathSegment parameters.
     /// </summary>
     protected override Expression VisitParameter(ParameterExpression node)
@@ -1010,5 +1658,16 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
             // For all other properties, keep the same name
             _ => csharpPropertyName
         };
+    }
+
+    private static string TryCompileEval(Expression expr)
+    {
+        try
+        {
+            var lambda = Expression.Lambda<Func<object>>(Expression.Convert(expr, typeof(object)));
+            var val = lambda.Compile()();
+            return val?.ToString() ?? "null";
+        }
+        catch { return expr.ToString() ?? "unknown"; }
     }
 }
