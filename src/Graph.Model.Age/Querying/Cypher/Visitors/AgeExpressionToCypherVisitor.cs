@@ -40,6 +40,7 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
     private readonly StringMethodHandler _stringHandler;
     private readonly MathMethodHandler _mathHandler;
     private readonly DateTimeMethodHandler _dateTimeHandler;
+    private readonly CollectionExpressionHandler _collectionHandler;
 
     public AgeExpressionToCypherVisitor(
         CypherQueryContext context,
@@ -67,6 +68,11 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
         _dateTimeHandler = new DateTimeMethodHandler(
             visitAndReturnCypher: VisitAndReturnCypher,
             addParameter: AddParameter);
+        _collectionHandler = new CollectionExpressionHandler(
+            visitAndReturnCypher: VisitAndReturnCypher,
+            visit: Visit,
+            addParameter: AddParameter,
+            logger: _logger);
     }
 
     private string AddParameter(object? value)
@@ -451,12 +457,12 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
         }
 
         // Handle closure-captured IEnumerable<IRelationship>.Count(lambda) patterns FIRST
-        // Must be before the generic HandleCountMethod which would intercept all Count calls
+        // Must be before the generic Count handler which would intercept all Count calls
         if (node.Method.Name == "Count")
         {
             if (TryHandleClosureCountOnRelationship(node))
                 return Expression.Constant(HandleClosureCountOnRelationship(node));
-            return HandleCountMethod(node);
+            return _collectionHandler.HandleCountMethod(node);
         }
 
         // Handle IGrouping aggregation: group.Average/Max/Min/Sum(lambda)
@@ -464,13 +470,13 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
              node.Method.Name == "Min" || node.Method.Name == "Sum")
             && node.Arguments.Count >= 1)
         {
-            return HandleGroupingAggregation(node, node.Method.Name.ToLowerInvariant());
+            return _collectionHandler.HandleGroupingAggregation(node, node.Method.Name.ToLowerInvariant());
         }
 
         // Handle collection methods (Contains, Any, etc.) - but not string.Contains
         if (node.Method.Name == "Contains" && node.Arguments.Count >= 1 && node.Method.DeclaringType != typeof(string))
         {
-            return HandleContainsMethod(node);
+            return _collectionHandler.HandleContainsMethod(node);
         }
 
         // Handle .ToList() on nested Select expressions from GroupBy results
@@ -647,126 +653,7 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
     // String methods moved to StringMethodHandler.
     // Math methods moved to MathMethodHandler.
     // DateTime methods moved to DateTimeMethodHandler.
-
-    private Expression HandleContainsMethod(MethodCallExpression node)
-    {
-        // Collection.Contains(item) => item IN collection
-        if (node.Object != null)
-        {
-            // Instance method: collection.Contains(item)
-            var collection = VisitAndReturnCypher(node.Object);
-            var item = VisitAndReturnCypher(node.Arguments[0]);
-            return Expression.Constant($"{item} IN {collection}");
-        }
-        else if (node.Arguments.Count == 2)
-        {
-            // Static method: Enumerable.Contains(collection, item)
-            var collection = VisitAndReturnCypher(node.Arguments[0]);
-            var item = VisitAndReturnCypher(node.Arguments[1]);
-            return Expression.Constant($"{item} IN {collection}");
-        }
-
-        throw new NotSupportedException("Unsupported Contains method signature");
-    }
-
-    private Expression HandleCountMethod(MethodCallExpression node)
-    {
-        // Handle Count() method on collections
-        // This could be:
-        // 1. collection.Count() - instance method with no arguments
-        // 2. Enumerable.Count(collection) - static method
-        // 3. Enumerable.Count(collection, predicate) - static method with predicate
-        
-        if (node.Object != null && node.Arguments.Count == 0)
-        {
-            // Instance method: collection.Count()
-            // Special case: if this is Count() on an IGrouping (g.Count()), translate to count(*)
-            if (node.Object is ParameterExpression param && 
-                param.Type.IsGenericType && 
-                param.Type.GetGenericTypeDefinition().Name.Contains("IGrouping"))
-            {
-                _logger.LogDebug("Processing g.Count() in GroupBy context - translating to count(*)");
-                return Expression.Constant("count(*)");
-            }
-            
-            // In Cypher, use size() function for normal collections
-            var collection = VisitAndReturnCypher(node.Object);
-            return Expression.Constant($"size({collection})");
-        }
-        else if (node.Arguments.Count == 1)
-        {
-            // Static method without predicate: Enumerable.Count(collection)
-            
-            // Special case: if this is Count(g) where g is an IGrouping, translate to count(*)
-            if (node.Arguments[0] is ParameterExpression param && 
-                param.Type.IsGenericType && 
-                param.Type.GetGenericTypeDefinition().Name.Contains("IGrouping"))
-            {
-                _logger.LogDebug("Processing Count(g) in GroupBy context - translating to count(*)");
-                return Expression.Constant("count(*)");
-            }
-            
-            var collection = VisitAndReturnCypher(node.Arguments[0]);
-            return Expression.Constant($"size({collection})");
-        }
-        else if (node.Arguments.Count == 2)
-        {
-            // Static method with predicate: Enumerable.Count(collection, predicate)
-            // This is more complex and may need pattern comprehension
-            // For now, try to evaluate at compile time
-            try
-            {
-                var objectMember = Expression.Convert(node, typeof(object));
-                var getterLambda = Expression.Lambda<Func<object>>(objectMember);
-                var getter = getterLambda.Compile();
-                var value = getter();
-                
-                var paramRef = AddParameter(value);
-                return Expression.Constant(paramRef);
-            }
-            catch
-            {
-                throw new NotSupportedException("Count with predicate requires compile-time evaluation");
-            }
-        }
-
-        throw new NotSupportedException("Unsupported Count method signature");
-    }
-
-    /// <summary>
-    /// Handles group.Average/Max/Min/Sum(lambda) on IGrouping parameters.
-    /// Translates to Cypher aggregation functions like avg(tgt0.Age).
-    /// </summary>
-    private Expression HandleGroupingAggregation(MethodCallExpression node, string aggFn)
-    {
-        var source = node.Object ?? (node.Arguments.Count >= 2 ? node.Arguments[0] : null);
-        if (source is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } conv)
-            source = conv.Operand;
-        var isGrouping = source is ParameterExpression param &&
-            param.Type.IsGenericType &&
-            param.Type.GetGenericTypeDefinition().Name.Contains("IGrouping");
-        if (!isGrouping) return Expression.Constant($"{aggFn}(*)");
-        var lambdaIdx = node.Arguments.Count >= 2 ? 1 : 0;
-        if (lambdaIdx >= node.Arguments.Count) return Expression.Constant($"{aggFn}(*)");
-        var lambdaArg = node.Arguments[lambdaIdx];
-        if (lambdaArg is UnaryExpression { NodeType: ExpressionType.Quote } quote)
-            lambdaArg = quote.Operand;
-        if (lambdaArg is not LambdaExpression lambda)
-            return Expression.Constant($"{aggFn}(*)");
-        // Map .NET aggregation names to AGE Cypher function names
-        var ageFn = aggFn switch
-        {
-            "average" => "avg",
-            _ => aggFn
-        };
-        var typedExpr = Visit(lambda.Body);
-        string cypherExpr = (typedExpr is ConstantExpression constExpr)
-            ? (constExpr.Value?.ToString() ?? "*")
-            : "*";
-        _logger.LogDebug("IGrouping.{Agg}(lambda) -> {Fn}({Expr})",
-            node.Method.Name, aggFn, cypherExpr);
-        return Expression.Constant($"{ageFn}({cypherExpr})");
-    }
+    // Collection methods (Contains, Count, GroupingAggregation) moved to CollectionExpressionHandler.
 
     /// <summary>
     /// Handles .ToList() on nested Select expressions from GroupBy results.
