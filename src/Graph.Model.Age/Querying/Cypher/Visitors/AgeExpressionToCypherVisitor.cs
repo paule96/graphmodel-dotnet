@@ -1615,35 +1615,8 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
         return Expression.Constant(_alias);
     }
 
-    /// <summary>
-    /// Checks if a type is a PathSegment type
-    /// </summary>
     private static bool IsPathSegmentType(Type type)
-    {
-        if (type == null) return false;
-        
-        // Check if it's the generic IGraphPathSegment interface
-        if (type.IsGenericType)
-        {
-            var genericTypeDef = type.GetGenericTypeDefinition();
-            return genericTypeDef.Name.StartsWith("IGraphPathSegment");
-        }
-        
-        // Check if any implemented interfaces are PathSegment types
-        foreach (var interfaceType in type.GetInterfaces())
-        {
-            if (interfaceType.IsGenericType)
-            {
-                var genericTypeDef = interfaceType.GetGenericTypeDefinition();
-                if (genericTypeDef.Name.StartsWith("IGraphPathSegment"))
-                {
-                    return true;
-                }
-            }
-        }
-        
-        return false;
-    }
+        => ExpressionTranslationHelper.IsPathSegmentType(type);
 
     // MapPropertyName and TryCompileEval are now imported via
     // `using static ExpressionTranslationHelper` at the top of the file.

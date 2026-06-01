@@ -14,6 +14,8 @@
 
 namespace Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core;
 
+using System;
+using System.Linq;
 using System.Linq.Expressions;
 
 /// <summary>
@@ -53,5 +55,30 @@ internal static class ExpressionTranslationHelper
         {
             return expr.ToString() ?? "unknown";
         }
+    }
+
+    /// <summary>
+    /// Checks whether the given type is a path segment type (IGraphPathSegment or GraphPathSegment).
+    /// </summary>
+    public static bool IsPathSegmentType(Type type)
+    {
+        if (!type.IsGenericType)
+        {
+            return false;
+        }
+
+        if (type.GetGenericTypeDefinition().Name.Contains("GraphPathSegment", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        // Also check for the interface form (IGraphPathSegment) used as result types
+        if (type.GetGenericTypeDefinition().Name.Contains("IGraphPathSegment", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return type.GetInterfaces()
+            .Any(i => i.IsGenericType && i.GetGenericTypeDefinition().Name.Contains("IGraphPathSegment", StringComparison.Ordinal));
     }
 }

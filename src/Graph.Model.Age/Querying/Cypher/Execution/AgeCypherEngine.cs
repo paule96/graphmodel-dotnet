@@ -552,26 +552,7 @@ internal sealed class AgeCypherEngine
     }
 
     private static bool IsPathSegmentType(Type type)
-    {
-        if (!type.IsGenericType)
-        {
-            return false;
-        }
-
-        if (type.GetGenericTypeDefinition().Name.Contains("GraphPathSegment", StringComparison.Ordinal))
-        {
-            return true;
-        }
-
-        // Also check for the interface form (IGraphPathSegment) used as result types
-        if (type.GetGenericTypeDefinition().Name.Contains("IGraphPathSegment", StringComparison.Ordinal))
-        {
-            return true;
-        }
-
-        return type.GetInterfaces()
-            .Any(i => i.IsGenericType && i.GetGenericTypeDefinition().Name.Contains("IGraphPathSegment", StringComparison.Ordinal));
-    }
+        => ExpressionTranslationHelper.IsPathSegmentType(type);
 
     private NpgsqlCommand CreateCypherCommandWithColumns(
         NpgsqlConnection connection,
