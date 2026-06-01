@@ -38,6 +38,8 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
     private readonly string? _relationshipAlias;
     private readonly string? _targetAlias;
     private readonly StringMethodHandler _stringHandler;
+    private readonly MathMethodHandler _mathHandler;
+    private readonly DateTimeMethodHandler _dateTimeHandler;
 
     public AgeExpressionToCypherVisitor(
         CypherQueryContext context,
@@ -61,6 +63,10 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
             visitAndReturnCypher: VisitAndReturnCypher,
             addParameter: AddParameter,
             logger: _logger);
+        _mathHandler = new MathMethodHandler(visitAndReturnCypher: VisitAndReturnCypher);
+        _dateTimeHandler = new DateTimeMethodHandler(
+            visitAndReturnCypher: VisitAndReturnCypher,
+            addParameter: AddParameter);
     }
 
     private string AddParameter(object? value)
@@ -429,7 +435,7 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
         // Handle Math methods
         if (node.Method.DeclaringType == typeof(Math))
         {
-            return HandleMathMethod(node);
+            return _mathHandler.HandleMathMethod(node);
         }
 
         // Handle string methods
@@ -441,7 +447,7 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
         // Handle DateTime methods (both static and instance)
         if (node.Method.DeclaringType == typeof(DateTime))
         {
-            return HandleDateTimeMethod(node);
+            return _dateTimeHandler.HandleDateTimeMethod(node);
         }
 
         // Handle closure-captured IEnumerable<IRelationship>.Count(lambda) patterns FIRST
@@ -638,136 +644,9 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
         return Expression.Constant(selectExpression);
     }
 
-    // String methods (HandleStringMethod, HandleStringContains, HandleStringStartsWith,
-    // HandleStringEndsWith) moved to StringMethodHandler class.
-
-    private Expression HandleMathMethod(MethodCallExpression node)
-    {
-        // Math methods in Cypher
-        return node.Method.Name switch
-        {
-            // abs(expression)
-            "Abs" when node.Arguments.Count == 1 =>
-                Expression.Constant($"abs({VisitAndReturnCypher(node.Arguments[0])})"),
-
-            // ceil(expression)
-            "Ceiling" when node.Arguments.Count == 1 =>
-                Expression.Constant($"ceil({VisitAndReturnCypher(node.Arguments[0])})"),
-
-            // floor(expression)
-            "Floor" when node.Arguments.Count == 1 =>
-                Expression.Constant($"floor({VisitAndReturnCypher(node.Arguments[0])})"),
-
-            // round(expression)
-            "Round" when node.Arguments.Count == 1 =>
-                Expression.Constant($"round({VisitAndReturnCypher(node.Arguments[0])})"),
-
-            // round(expression, precision)
-            "Round" when node.Arguments.Count == 2 =>
-                Expression.Constant($"round({VisitAndReturnCypher(node.Arguments[0])}, {VisitAndReturnCypher(node.Arguments[1])})"),
-
-            // sqrt(expression)
-            "Sqrt" when node.Arguments.Count == 1 =>
-                Expression.Constant($"sqrt({VisitAndReturnCypher(node.Arguments[0])})"),
-
-            // exp(expression)
-            "Exp" when node.Arguments.Count == 1 =>
-                Expression.Constant($"exp({VisitAndReturnCypher(node.Arguments[0])})"),
-
-            // log(expression)
-            "Log" when node.Arguments.Count == 1 =>
-                Expression.Constant($"log({VisitAndReturnCypher(node.Arguments[0])})"),
-
-            // log10(expression)
-            "Log10" when node.Arguments.Count == 1 =>
-                Expression.Constant($"log10({VisitAndReturnCypher(node.Arguments[0])})"),
-
-            // sign(expression) - returns -1, 0, or 1
-            "Sign" when node.Arguments.Count == 1 =>
-                Expression.Constant($"sign({VisitAndReturnCypher(node.Arguments[0])})"),
-
-            // sin(expression)
-            "Sin" when node.Arguments.Count == 1 =>
-                Expression.Constant($"sin({VisitAndReturnCypher(node.Arguments[0])})"),
-
-            // cos(expression)
-            "Cos" when node.Arguments.Count == 1 =>
-                Expression.Constant($"cos({VisitAndReturnCypher(node.Arguments[0])})"),
-
-            // tan(expression)
-            "Tan" when node.Arguments.Count == 1 =>
-                Expression.Constant($"tan({VisitAndReturnCypher(node.Arguments[0])})"),
-
-            // asin(expression)
-            "Asin" when node.Arguments.Count == 1 =>
-                Expression.Constant($"asin({VisitAndReturnCypher(node.Arguments[0])})"),
-
-            // acos(expression)
-            "Acos" when node.Arguments.Count == 1 =>
-                Expression.Constant($"acos({VisitAndReturnCypher(node.Arguments[0])})"),
-
-            // atan(expression)
-            "Atan" when node.Arguments.Count == 1 =>
-                Expression.Constant($"atan({VisitAndReturnCypher(node.Arguments[0])})"),
-
-            // Max(a, b)
-            "Max" when node.Arguments.Count == 2 =>
-                Expression.Constant($"CASE WHEN {VisitAndReturnCypher(node.Arguments[0])} > {VisitAndReturnCypher(node.Arguments[1])} THEN {VisitAndReturnCypher(node.Arguments[0])} ELSE {VisitAndReturnCypher(node.Arguments[1])} END"),
-
-            // Min(a, b)
-            "Min" when node.Arguments.Count == 2 =>
-                Expression.Constant($"CASE WHEN {VisitAndReturnCypher(node.Arguments[0])} < {VisitAndReturnCypher(node.Arguments[1])} THEN {VisitAndReturnCypher(node.Arguments[0])} ELSE {VisitAndReturnCypher(node.Arguments[1])} END"),
-
-            // Pow(base, exponent)
-            "Pow" when node.Arguments.Count == 2 =>
-                Expression.Constant($"({VisitAndReturnCypher(node.Arguments[0])}) ^ ({VisitAndReturnCypher(node.Arguments[1])})"),
-
-            _ => throw new NotSupportedException($"Math method {node.Method.Name} is not supported")
-        };
-    }
-
-    private Expression HandleDateTimeMethod(MethodCallExpression node)
-    {
-        // Handle instance methods on DateTime objects (e.g., date.AddDays(7))
-        if (node.Object != null)
-        {
-            try
-            {
-                // Try to evaluate the entire expression at compile time
-                var objectMember = Expression.Convert(node, typeof(object));
-                var getterLambda = Expression.Lambda<Func<object>>(objectMember);
-                var getter = getterLambda.Compile();
-                var value = getter();
-                
-                // Store as parameter and return reference
-                var paramRef = AddParameter(value);
-                return Expression.Constant(paramRef);
-            }
-            catch
-            {
-                // If evaluation fails, fall through to unsupported
-                throw new NotSupportedException($"DateTime method {node.Method.Name} is not supported");
-            }
-        }
-        
-        // Handle static methods on DateTime type
-        return node.Method.Name switch
-        {
-            // DateTime.Now - returns current local datetime
-            "get_Now" when node.Arguments.Count == 0 =>
-                Expression.Constant("localdatetime()"),
-
-            // DateTime.Today - returns current date at midnight (local)
-            "get_Today" when node.Arguments.Count == 0 =>
-                Expression.Constant("date()"),
-
-            // DateTime.UtcNow - returns current UTC datetime
-            "get_UtcNow" when node.Arguments.Count == 0 =>
-                Expression.Constant("datetime()"),
-
-            _ => throw new NotSupportedException($"DateTime method {node.Method.Name} is not supported")
-        };
-    }
+    // String methods moved to StringMethodHandler.
+    // Math methods moved to MathMethodHandler.
+    // DateTime methods moved to DateTimeMethodHandler.
 
     private Expression HandleContainsMethod(MethodCallExpression node)
     {
