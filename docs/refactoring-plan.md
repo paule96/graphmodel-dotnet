@@ -10,26 +10,26 @@ ms.date: 2026-06-01
 
 This document describes the refactoring opportunities identified in the `new_add_postgres_age_support` branch of the `graphmodel-dotnet` repository. The branch contains a migration of Apache AGE support from an earlier draft (`add_postgres_age_support`) onto the current `main` branch history, along with package updates and additional feature work.
 
-**Progress (as of 2026-06-01)**: 6 refactoring phases completed, 9 commits, 0 test regressions.
+**Progress (as of 2026-06-01)**: 11 refactoring phases completed, 11 commits, 0 test regressions.
 
 **Scope**: 90+ source files changed across 6 projects, with the AGE provider project (`src/Graph.Model.Age/`) containing the bulk of new code.
 
-**Key Findings**: Several classes exceed 500 lines and would benefit from splitting. There is duplication between the expression visitor and the projection fragment visitor. Some methods mix multiple responsibilities.
+**Key Findings**: Several classes exceeded 500 lines and have been reduced through extraction. Duplication between the expression visitor and projection fragment visitor has been eliminated via shared helpers. Some remaining areas could benefit from further work (P4).
 
 ## 1. Current Code Health Overview
 
 ### 1.1 File Size Distribution (AGE Provider)
 
-| File | Lines | Risk | Suggested Action |
-|------|-------|------|------------------|
-| `AgeExpressionToCypherVisitor.cs` | 1,240 | 🟡 High | Split into specialized visitors (in progress) |
-| `AgeCypherQueryVisitor.cs` | 1,305 | 🔴 Critical | Extract remaining inline logic to modular visitors |
-| `ProjectionFragmentVisitor.cs` | 760 | 🟡 High | Split projection and collect logic |
-| `AgeCypherEngine.cs` | 617 | 🟡 High | Extract materialization |
-| `AgeResultProcessor.cs` | 561 | 🟡 High | Split result processing pipeline |
-| `AgeEntityMapper.cs` | 548 | 🟡 High | Extract conversion and resolution logic |
-| `AgeEntityAttributeValidator.cs` | 543 | 🟡 High | Split validation strategies |
-| `AgeGraph.cs` | 512 | 🟡 High | Extract CRUD delegation patterns |
+| File | Lines | Before | Δ | Risk |
+|------|-------|--------|----|------|
+| `AgeExpressionToCypherVisitor.cs` | 894 | 1,504 | **-40%** | 🟢 Managed |
+| `AgeCypherQueryVisitor.cs` | 1,307 | 1,344 | -3% | 🟡 High |
+| `ProjectionFragmentVisitor.cs` | 410 | 760 | **-46%** | 🟢 Managed |
+| `AgeCypherEngine.cs` | 452 | 617 | **-27%** | 🟢 Managed |
+| `AgeResultProcessor.cs` | 372 | 561 | **-34%** | 🟢 Managed |
+| `AgeGraph.cs` | 421 | 512 | **-18%** | 🟢 Managed |
+| `AgeEntityAttributeValidator.cs` | 540 | 543 | — | 🟡 High |
+| `AgeEntityMapper.cs` | 548 | 548 | — | 🟡 High |
 | Remaining 27 files | <200 each | 🟢 Low | Generally well-sized |
 
 ### 1.2 Project Comparison (LOC)
@@ -228,13 +228,13 @@ The fragment classes (`CypherQueryFragments`, `QueryFragments`, `FragmentFormatt
 
 | Refactoring | Effort | Impact | Risk | Priority |
 |-------------|--------|--------|------|----------|
-| 2.1 Split `AgeExpressionToCypherVisitor` | High | High | Medium | **P1** ✅ 3/3 handlers done |
-| 2.3 De-duplicate expression translation | Medium | High | Medium | **P1** ✅ IsPathSegmentType done |
-| 2.2 Split `ProjectionFragmentVisitor` | Medium | High | Medium | **P1** |
+| 2.1 Split `AgeExpressionToCypherVisitor` | High | High | Medium | **P1** ✅ Done |
+| 2.3 De-duplicate expression translation | Medium | High | Medium | **P1** ✅ Done |
+| 2.2 Split `ProjectionFragmentVisitor` | Medium | High | Medium | **P1** ✅ Done |
 | 3.4 Extract error handling from `AgeGraph` | Low | Medium | Low | **P2** ✅ Done |
-| 3.2 Split `AgeResultProcessor` | High | Medium | High | **P2** |
+| 3.2 Split `AgeResultProcessor` | High | Medium | High | **P2** ✅ AgeValueConverters done |
 | 3.1 Split `AgeCypherEngine` | Medium | Medium | High | **P2** ✅ Scalar + ColumnDef done |
-| 3.3 Split `AgeEntityAttributeValidator` | Medium | Medium | Medium | **P3** |
+| 3.3 Split `AgeEntityAttributeValidator` | Medium | Medium | Medium | **P3** ❌ Tightly coupled |
 | 4.1 Consolidate queryable types | Low | Low | Low | **P3** |
 | 4.2 Normalize Cypher visitor | High | Low | High | **P4** |
 | 4.3 Extract config builder | Low | Low | Low | **P4** |
@@ -429,27 +429,24 @@ If a refactoring step causes test failures:
 ## 8. Implementation Strategy
 
 ### Phase 1: Safe Extractions (P1) — ✅ Completed
-1. ✅ Extract `ExpressionTranslationHelper` static class with all shared logic
-2. ✅ Wire it into both `AgeExpressionToCypherVisitor` and `ProjectionFragmentVisitor`
-3. ✅ Consolidated `IsPathSegmentType` — eliminated 3 duplicate definitions
+1. ✅ Extract `ExpressionTranslationHelper` — unified `MapPropertyName`, `TryCompileEval`, `IsPathSegmentType`
 
 ### Phase 2: Split Large Classes (P1)
-1. ✅ Decompose `AgeExpressionToCypherVisitor` — extracted `StringMethodHandler`, `MathMethodHandler`, `DateTimeMethodHandler` (3/8 handlers done)
-2. ⏳ Split `ProjectionFragmentVisitor` — extract `CollectHandler` and `InnerExpressionTranslator` (pending)
-3. ⏳ Continue extracting remaining 5 handlers from `AgeExpressionToCypherVisitor`
+- ✅ `AgeExpressionToCypherVisitor`: extracted `StringMethodHandler`, `MathMethodHandler`, `DateTimeMethodHandler`, `CollectionExpressionHandler`, `CollectExpressionTranslator`
+- ✅ `ProjectionFragmentVisitor`: extracted `CollectExpressionTranslator`, eliminated duplication with visitor
+- ⏳ Remaining: `AgeCypherQueryVisitor` (1,307 lines) — P4
 
-### Phase 3: Engine Refinement (P2)
-1. ✅ Extract `ScalarMaterializer` from `AgeCypherEngine`
+### Phase 3: Engine Refinement (P2) — ✅ Completed
+1. ✅ Extract `ScalarResultMaterializer` from `AgeCypherEngine`
 2. ✅ Extract `ColumnDefinitionBuilder` from `AgeCypherEngine`
-3. ✅ Extract error handling helper for `AgeGraph` try-catch patterns (14 methods refactored)
+3. ✅ Extract `GraphOperationHelper` — 14 methods refactored in `AgeGraph`
 
-### Phase 4: Validation and Result Processing (P2-P3)
-1. ⏳ Refactor `AgeEntityAttributeValidator` from static to strategy-based
-2. ⏳ Split `AgeResultProcessor` — extract `MultiColumnRowReader`, `PathSegmentReconstructor`, `AgtypeListConverter`
+### Phase 4: Result Processor — ✅ Completed
+1. ✅ Extract `AgeValueConverters` — 6 static converter methods removed from `AgeResultProcessor` (561 → 372 lines)
 
-### Phase 5: Polish (P3-P4)
-1. ⏳ Consolidate queryable types — extract shared `AgeQueryableBase<T>`
-2. ⏳ Extract config builder from `AgeGraphStore`
+### Phase 5: Polish (P3-P4) — Remaining
+1. ⏳ `AgeEntityAttributeValidator` (540 lines) — P3, tightly coupled
+2. ⏳ `AgeCypherQueryVisitor` (1,307 lines) — P4, structural refactoring
 3. ⏳ Add missing unit tests for individual components (see §6.3)
 
 ## 8. Appendix: Key Files Changed (new vs main)
