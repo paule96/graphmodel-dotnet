@@ -21,6 +21,7 @@ using Cvoya.Graph.Model.Serialization;
 using Microsoft.Extensions.Logging;
 using Npgsql.Age;
 using Npgsql.Age.Types;
+using Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core;
 
 /// <summary>
 /// Handles CRUD operations for node entities within Apache AGE.
@@ -223,11 +224,5 @@ internal sealed class AgeNodeManager
     }
 
     private static string MapPropertyNameForAge(string csharpPropertyName)
-    {
-        return csharpPropertyName switch
-        {
-            "Id" => "user_id",
-            _ => csharpPropertyName
-        };
-    }
+        => ExpressionTranslationHelper.MapPropertyName(csharpPropertyName);
 }

@@ -1412,21 +1412,8 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         return null;
     }
 
-    /// <summary>
-    /// Maps C# property names to AGE database field names.
-    /// </summary>
-    private static string MapPropertyNameForAge(string csharpPropertyName)
-    {
-        return csharpPropertyName switch
-        {
-            // Map C# "Id" property to our prefixed "user_id" field to avoid conflict with PostgreSQL internal "id"
-            // This ensures we always use our application-controlled IDs, not PostgreSQL internal IDs
-            "Id" => "user_id",
-            
-            // For all other properties, keep the same name
-            _ => csharpPropertyName
-        };
-    }
+    // MapPropertyNameForAge was unused (defined but never called).
+    // Use ExpressionTranslationHelper.MapPropertyName() if needed.
 
     /// <summary>
     /// Finalizes the query by adding any missing default projections.

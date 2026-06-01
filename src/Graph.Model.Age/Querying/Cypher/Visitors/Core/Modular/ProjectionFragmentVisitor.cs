@@ -7,6 +7,7 @@ using System.Linq.Expressions;
 using Cvoya.Graph.Model;
 using Cvoya.Graph.Model.Cypher.Querying.Cypher.Visitors.Core;
 using Microsoft.Extensions.Logging;
+using static Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core.ExpressionTranslationHelper;
 
 /// <summary>
 /// Specialized visitor for handling projection operations (Select).
@@ -476,7 +477,7 @@ internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
                     nameof(IGraphPathSegment.Relationship) => relAlias,
                     _ => throw new NotSupportedException($"Unknown path component {innerMem.Member.Name}")
                 };
-                var propName = MapPropertyNameStatic(memberExpr.Member.Name);
+                var propName = MapPropertyName(memberExpr.Member.Name);
                 return $"{alias}.{propName}";
             }
 
@@ -498,7 +499,7 @@ internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
                 innerExpr is UnaryExpression || innerExpr is ConditionalExpression)
             {
                 var baseCypher = TranslateInnerExpression(innerExpr, innerParam, srcAlias, relAlias, tgtAlias);
-                var prop = MapPropertyNameStatic(memberExpr.Member.Name);
+                var prop = MapPropertyName(memberExpr.Member.Name);
 
                 // Handle TimeSpan properties specially
                 if (memberExpr.Member.DeclaringType == typeof(TimeSpan))
@@ -511,7 +512,7 @@ internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
             // For Traverse() queries, innerParam is the entity type, not IGraphPathSegment
             if (memberExpr.Expression == innerParam && typeof(INode).IsAssignableFrom(innerParam.Type))
             {
-                return $"{tgtAlias}.{MapPropertyNameStatic(memberExpr.Member.Name)}";
+                return $"{tgtAlias}.{MapPropertyName(memberExpr.Member.Name)}";
             }
 
             // Try constant evaluation
@@ -649,7 +650,7 @@ internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
         var remainingPath = new List<string>();
         for (int i = startIndex; i >= 0; i--)
         {
-            remainingPath.Add(MapPropertyNameStatic(members[i].Member.Name));
+            remainingPath.Add(MapPropertyName(members[i].Member.Name));
         }
 
         return (alias, remainingPath);
@@ -753,31 +754,9 @@ internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
         }
     }
 
-    /// <summary>
-    /// Maps C# property names to AGE storage names. Static version for use in inner expression translation.
-    /// </summary>
-    private static string MapPropertyNameStatic(string csharpPropertyName)
-    {
-        return csharpPropertyName switch
-        {
-            "Id" => "user_id",
-            _ => csharpPropertyName
-        };
-    }
-
-    private static string TryCompileEval(Expression expr)
-    {
-        try
-        {
-            var lambda = Expression.Lambda<Func<object>>(Expression.Convert(expr, typeof(object)));
-            var val = lambda.Compile()();
-            return val?.ToString() ?? "null";
-        }
-        catch
-        {
-            return expr.ToString() ?? "unknown";
-        }
-    }
+    // MapPropertyNameStatic and TryCompileEval are now imported via
+    // `using static ExpressionTranslationHelper` at the top of the file.
+    // Use MapPropertyName() instead of the old MapPropertyNameStatic().
 
     private static string TryResolveExpression(Expression expr, AgeExpressionToCypherVisitor visitor)
     {

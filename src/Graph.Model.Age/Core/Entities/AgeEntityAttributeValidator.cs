@@ -26,6 +26,7 @@ using Cvoya.Graph.Model;
 using Npgsql.Age;
 using Microsoft.Extensions.Logging;
 using Npgsql.Age.Types;
+using static Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core.ExpressionTranslationHelper;
 
 /// <summary>
 /// Validates attribute-driven constraints for AGE entities before persisting changes.
@@ -606,11 +607,7 @@ internal static class AgeEntityAttributeValidator
         return $"{alias}.`{EscapePropertyName(mapped)}`";
     }
 
-    private static string MapPropertyName(string propertyName) => propertyName switch
-    {
-        nameof(IEntity.Id) => "user_id",
-        _ => propertyName
-    };
+    // MapPropertyName is imported via `using static ExpressionTranslationHelper`
 
     private static string EscapeLabel(string label) => $"`{label.Replace("`", "``")}`";
 

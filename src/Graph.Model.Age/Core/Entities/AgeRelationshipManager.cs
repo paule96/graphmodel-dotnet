@@ -20,6 +20,7 @@ using Cvoya.Graph.Model;
 using Cvoya.Graph.Model.Serialization;
 using Npgsql.Age;
 using Npgsql.Age.Types;
+using Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core;
 
 /// <summary>
 /// Handles CRUD operations for AGE relationships.
@@ -154,11 +155,5 @@ internal sealed class AgeRelationshipManager
     }
 
     private static string MapPropertyNameForAge(string csharpPropertyName)
-    {
-        return csharpPropertyName switch
-        {
-            "Id" => "user_id",
-            _ => csharpPropertyName
-        };
-    }
+        => ExpressionTranslationHelper.MapPropertyName(csharpPropertyName);
 }

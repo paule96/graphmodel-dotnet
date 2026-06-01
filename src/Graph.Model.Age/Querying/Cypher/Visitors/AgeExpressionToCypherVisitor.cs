@@ -21,6 +21,7 @@ using Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core;
 using Cvoya.Graph.Model.Cypher.Querying.Cypher.Visitors.Core;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using static Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core.ExpressionTranslationHelper;
 
 /// <summary>
 /// Translates .NET LINQ expressions to Cypher expressions for AGE.
@@ -1644,30 +1645,6 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
         return false;
     }
 
-    /// <summary>
-    /// Maps C# property names to AGE property names.
-    /// </summary>
-    private static string MapPropertyName(string csharpPropertyName)
-    {
-        return csharpPropertyName switch
-        {
-            // Map C# "Id" property to our prefixed "user_id" field to avoid conflict with PostgreSQL internal "Id"
-            // This ensures we always use our application-controlled IDs, not PostgreSQL internal IDs
-            "Id" => "user_id",
-            
-            // For all other properties, keep the same name
-            _ => csharpPropertyName
-        };
-    }
-
-    private static string TryCompileEval(Expression expr)
-    {
-        try
-        {
-            var lambda = Expression.Lambda<Func<object>>(Expression.Convert(expr, typeof(object)));
-            var val = lambda.Compile()();
-            return val?.ToString() ?? "null";
-        }
-        catch { return expr.ToString() ?? "unknown"; }
-    }
+    // MapPropertyName and TryCompileEval are now imported via
+    // `using static ExpressionTranslationHelper` at the top of the file.
 }
