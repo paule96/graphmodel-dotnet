@@ -407,16 +407,13 @@ internal sealed class AgeCypherEngine
             string columnDefs;
             if (projectionExpression != null)
             {
-                columnDefs = BuildColumnDefinitions(projectionExpression);
+                columnDefs = ColumnDefinitionBuilder.BuildColumnDefinitions(projectionExpression);
             }
             else
             {
-                // For path segment queries, build column definitions matching the 3-aliases
-                // returned by DetermineReturnClause for MatchSegmentFragment.
-                // The aliases are: srcAlias, relAlias, tgtAlias (e.g. src0, r0, tgt0).
-                columnDefs = BuildPathSegmentColumnDefinitions();
+                columnDefs = ColumnDefinitionBuilder.BuildPathSegmentColumnDefinitions();
             }
-            command = CreateCypherCommandWithColumns(_graphContext.Connection, _graphContext.GraphName, cypher, parameters, columnDefs);
+            command = ColumnDefinitionBuilder.CreateCypherCommandWithColumns(_graphContext.Connection, _graphContext.GraphName, cypher, parameters, columnDefs);
         }
         else
         {
@@ -494,116 +491,9 @@ internal sealed class AgeCypherEngine
         return null;
     }
 
-    private string BuildColumnDefinitions(LambdaExpression projectionExpression)
-    {
-        var body = projectionExpression.Body;
-        
-        // Handle simple property projection: Select(p => p.FirstName)
-        if (body is MemberExpression memberExpr)
-        {
-            var columnName = memberExpr.Member.Name;
-            // Use double quotes for PostgreSQL identifier escaping
-            return $"(\"{columnName}\" agtype)";
-        }
-        
-        // Handle anonymous type projection: Select(p => new { p.FirstName, p.LastName })
-        if (body is NewExpression newExpr)
-        {
-            var columns = new List<string>();
-            
-            for (int i = 0; i < newExpr.Arguments.Count; i++)
-            {
-                var member = newExpr.Members?[i];
-                // When Members is null (named record types like `new Foo(x, y)`),
-                // extract parameter names from the constructor via reflection so column
-                // aliases match the record's parameter names (e.g., "Since", "EndNode")
-                // instead of falling back to "field0", "field1" etc.
-                var columnName = member?.Name ?? GetNewExpressionParameterName(newExpr, i) ?? $"field{i}";
-                var memberType = member switch
-                {
-                    PropertyInfo pi => pi.PropertyType,
-                    FieldInfo fi => fi.FieldType,
-                    _ => newExpr.Arguments[i].Type
-                };
-                
-                // Apache AGE doesn't support proper identifier escaping in Cypher
-                // Use c_ prefix in Cypher RETURN, then map to actual property name in SQL column definition
-                var cypherAlias = $"c_{columnName}";
-                
-                if (IsPathSegmentType(memberType))
-                {
-                    // Path segments are expanded into three columns: source node, relationship, target node
-                    columns.Add($"\"{cypherAlias}_src\" agtype");
-                    columns.Add($"\"{cypherAlias}_r\" agtype");
-                    columns.Add($"\"{cypherAlias}_tgt\" agtype");
-                }
-                else
-                {
-                    // Use double quotes for PostgreSQL identifier escaping in SQL portion
-                    columns.Add($"\"{cypherAlias}\" agtype");
-                }
-            }
-            
-            return $"({string.Join(", ", columns)})";
-        }
-        
-        // Default fallback
-        return "(result agtype)";
-    }
-
     private static bool IsPathSegmentType(Type type)
         => ExpressionTranslationHelper.IsPathSegmentType(type);
 
-    private NpgsqlCommand CreateCypherCommandWithColumns(
-        NpgsqlConnection connection,
-        string graphName,
-        string cypher,
-        Dictionary<string, object?> parameters,
-        string columnDefinitions)
-    {
-        // Build the SQL query with explicit column definitions.
-        // In Konnektr 1.x, CypherHelpers.EscapeCypher() was called inside CreateCypherCommand
-        // to escape backslashes. In Konnektr 2.x, EscapeCypher was removed, so the visitor
-        // code now generates Cypher with properly escaped backslashes (e.g., \\m for regex
-        // word boundary anchors). Since $$...$$ dollar-quoted strings preserve backslashes
-        // literally, no additional escaping is needed here.
-        
-        // Serialize parameters to JSON
-        var parametersJson = System.Text.Json.JsonSerializer.Serialize(parameters);
-        var agtypeParams = new Agtype(parametersJson);
-        
-        // Build the full SQL query
-        var sql = $"SELECT * FROM ag_catalog.cypher('{graphName}', $$ {cypher} $$, $1) as {columnDefinitions};";
-        
-        var command = new NpgsqlCommand(sql, connection);
-        command.Parameters.Add(new NpgsqlParameter { Value = agtypeParams, DataTypeName = "ag_catalog.agtype" });
-        
-        return command;
-    }
-
-    private static string BuildPathSegmentColumnDefinitions()
-    {
-        // For path segment queries with no projection, the Cypher RETURN clause returns
-        // the 3 created aliases from the MatchSegmentFragment (src0, r0, tgt0).
-        // Build matching SQL column definitions.
-        // In a chained pattern: hop 0 has (src0, r0, tgt0), hop 1 (tgt0, r1, tgt1), etc.
-        // For single-hop path segments (the common case), aliases are src0, r0, tgt0.
-        return "(src0 agtype, r0 agtype, tgt0 agtype)";
-    }
-
-    /// <summary>
-    /// When a NewExpression's Members array is null (happens for named record types like
-    /// <c>new PathSegmentProjection(since, endNode)</c>), extracts the constructor parameter
-    /// name at the given index so column aliases match the record's parameter names.
-    /// </summary>
-    private static string? GetNewExpressionParameterName(NewExpression newExpr, int parameterIndex)
-    {
-        var constructor = newExpr.Type.GetConstructors().FirstOrDefault();
-        if (constructor == null)
-            return null;
-        var parameters = constructor.GetParameters();
-        if (parameterIndex < 0 || parameterIndex >= parameters.Length)
-            return null;
-        return parameters[parameterIndex].Name;
-    }
+    // BuildColumnDefinitions, CreateCypherCommandWithColumns, BuildPathSegmentColumnDefinitions,
+    // and GetNewExpressionParameterName moved to ColumnDefinitionBuilder.
 }
