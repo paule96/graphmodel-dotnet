@@ -37,6 +37,7 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
     private readonly string? _sourceAlias;
     private readonly string? _relationshipAlias;
     private readonly string? _targetAlias;
+    private readonly StringMethodHandler _stringHandler;
 
     public AgeExpressionToCypherVisitor(
         CypherQueryContext context,
@@ -55,6 +56,11 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
         _sourceAlias = sourceAlias;
         _relationshipAlias = relationshipAlias;
         _targetAlias = targetAlias;
+
+        _stringHandler = new StringMethodHandler(
+            visitAndReturnCypher: VisitAndReturnCypher,
+            addParameter: AddParameter,
+            logger: _logger);
     }
 
     private string AddParameter(object? value)
@@ -429,7 +435,7 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
         // Handle string methods
         if (node.Method.DeclaringType == typeof(string))
         {
-            return HandleStringMethod(node);
+            return _stringHandler.HandleStringMethod(node);
         }
 
         // Handle DateTime methods (both static and instance)
@@ -632,146 +638,8 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
         return Expression.Constant(selectExpression);
     }
 
-    private Expression HandleStringMethod(MethodCallExpression node)
-    {
-        var obj = node.Object != null ? VisitAndReturnCypher(node.Object) : null;
-
-        return node.Method.Name switch
-        {
-            // StartsWith - use =~ regex (AGE doesn't support STARTS WITH)
-            "StartsWith" when node.Arguments.Count == 1 =>
-                HandleStringStartsWith(obj, node.Arguments[0]),
-
-            // EndsWith - use =~ regex (AGE doesn't support ENDS WITH)
-            "EndsWith" when node.Arguments.Count == 1 =>
-                HandleStringEndsWith(obj, node.Arguments[0]),
-
-            // Contains - check if string contains substring
-            // Apache AGE doesn't support string concatenation in regex, so we build the pattern as a parameter
-            "Contains" when node.Arguments.Count == 1 =>
-                HandleStringContains(obj, node.Arguments[0]),
-
-            "ToLower" when node.Arguments.Count == 0 =>
-                Expression.Constant($"toLower({obj})"),
-
-            "ToUpper" when node.Arguments.Count == 0 =>
-                Expression.Constant($"toUpper({obj})"),
-
-            "Trim" when node.Arguments.Count == 0 =>
-                Expression.Constant($"trim({obj})"),
-
-            // Substring(start) - get substring from start to end
-            "Substring" when node.Arguments.Count == 1 =>
-                Expression.Constant($"substring({obj}, {VisitAndReturnCypher(node.Arguments[0])})"),
-
-            // Substring(start, length) - get substring with specific length
-            "Substring" when node.Arguments.Count == 2 =>
-                Expression.Constant($"substring({obj}, {VisitAndReturnCypher(node.Arguments[0])}, {VisitAndReturnCypher(node.Arguments[1])})"),
-
-            // Replace(oldValue, newValue)
-            "Replace" when node.Arguments.Count == 2 =>
-                Expression.Constant($"replace({obj}, {VisitAndReturnCypher(node.Arguments[0])}, {VisitAndReturnCypher(node.Arguments[1])})"),
-
-            // Length property (accessed as method in expression tree)
-            "get_Length" when node.Arguments.Count == 0 =>
-                Expression.Constant($"size({obj})"),
-
-            _ => throw new NotSupportedException($"String method {node.Method.Name} is not supported")
-        };
-    }
-
-    private Expression HandleStringContains(string? obj, Expression substringExpression)
-    {
-        // For string.Contains(), use the =~ regex operator (which AGE supports).
-        // Build a regex pattern .*search.* and pass it as a parameter.
-        
-        object? substringValue = null;
-        
-        // Try to extract the value from the expression
-        if (substringExpression is ConstantExpression constantExpr)
-        {
-            substringValue = constantExpr.Value;
-        }
-        else if (substringExpression is MemberExpression memberExpr)
-        {
-            try
-            {
-                var lambda = Expression.Lambda<Func<object>>(Expression.Convert(memberExpr, typeof(object)));
-                var compiled = lambda.Compile();
-                substringValue = compiled();
-            }
-            catch { }
-        }
-        
-        // If we got the value, create a regex pattern and add it as a parameter
-        if (substringValue is string substring)
-        {
-            var regexPattern = $".*{System.Text.RegularExpressions.Regex.Escape(substring)}.*";
-            var paramName = AddParameter(regexPattern);
-            return Expression.Constant($"{obj} =~ {paramName}");
-        }
-        
-        // Fallback: visit the substring expression
-        _logger.LogWarning("Could not evaluate Contains argument, attempting fallback");
-        var substringCypher = VisitAndReturnCypher(substringExpression);
-        return Expression.Constant($"{obj} =~ ('.*' + {substringCypher} + '.*')");
-    }
-
-    private Expression HandleStringStartsWith(string? obj, Expression prefixExpression)
-    {
-        // For string.StartsWith(), use the =~ regex operator with ^ prefix anchor.
-        object? prefixValue = null;
-        
-        if (prefixExpression is ConstantExpression constantExpr)
-            prefixValue = constantExpr.Value;
-        else if (prefixExpression is MemberExpression memberExpr)
-        {
-            try
-            {
-                var lambda = Expression.Lambda<Func<object>>(Expression.Convert(memberExpr, typeof(object)));
-                prefixValue = lambda.Compile();
-            }
-            catch { }
-        }
-        
-        if (prefixValue is string prefix)
-        {
-            var regexPattern = $"^{System.Text.RegularExpressions.Regex.Escape(prefix)}.*";
-            var paramName = AddParameter(regexPattern);
-            return Expression.Constant($"{obj} =~ {paramName}");
-        }
-        
-        var prefixCypher = VisitAndReturnCypher(prefixExpression);
-        return Expression.Constant($"{obj} =~ ('^' + {prefixCypher} + '.*')");
-    }
-
-    private Expression HandleStringEndsWith(string? obj, Expression suffixExpression)
-    {
-        // For string.EndsWith(), use the =~ regex operator with $ suffix anchor.
-        object? suffixValue = null;
-        
-        if (suffixExpression is ConstantExpression constantExpr)
-            suffixValue = constantExpr.Value;
-        else if (suffixExpression is MemberExpression memberExpr)
-        {
-            try
-            {
-                var lambda = Expression.Lambda<Func<object>>(Expression.Convert(memberExpr, typeof(object)));
-                suffixValue = lambda.Compile();
-            }
-            catch { }
-        }
-        
-        if (suffixValue is string suffix)
-        {
-            var regexPattern = $".*{System.Text.RegularExpressions.Regex.Escape(suffix)}$";
-            var paramName = AddParameter(regexPattern);
-            return Expression.Constant($"{obj} =~ {paramName}");
-        }
-        
-        var suffixCypher = VisitAndReturnCypher(suffixExpression);
-        return Expression.Constant($"{obj} =~ ('.*' + {suffixCypher} + '$')");
-    }
+    // String methods (HandleStringMethod, HandleStringContains, HandleStringStartsWith,
+    // HandleStringEndsWith) moved to StringMethodHandler class.
 
     private Expression HandleMathMethod(MethodCallExpression node)
     {
