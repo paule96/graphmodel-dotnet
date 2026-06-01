@@ -1,14 +1,29 @@
 ﻿namespace SimpleMovieExample;
 
 using Cvoya.Graph.Model;
+using Cvoya.Graph.Model.Age.Core;
 using Cvoya.Graph.Model.Neo4j;
+using Microsoft.Extensions.Hosting;
 using Neo4j.Driver;
+using RazorConsole.Core;
+using SimpleMovieExample.Components;
 
-static class Program
+static partial class Program
 {
     static string databaseName = "SimpleMovieExample";
 
     async static Task Main()
+    {
+        var hostBuilder = Host.CreateDefaultBuilder()
+            .UseRazorConsole<App>();
+        hostBuilder.Build().Run();
+    }
+
+    /// <summary>
+    /// Runs the SimpleMovieExample directly via console output (no RazorConsole UI).
+    /// Demonstrates async graph traversal with Neo4j.
+    /// </summary>
+    public async static Task RunExampleAsync()
     {
         var driver = GraphDatabase.Driver("bolt://localhost:7687", AuthTokens.Basic("neo4j", "password"));
         await using (var session = driver.AsyncSession(sc => sc.WithDatabase("system")))
@@ -56,15 +71,15 @@ static class Program
         await graph.CreateRelationshipAsync(bobWatchedTheMatrix);
         await graph.CreateRelationshipAsync(charlieWatchedInterstellar);
 
-
         var moviesAliceWatched = (await graph.NodesAsync<Person>())
             .Where(p => p.Name == "Alice")
             .Traverse<Person, Watched, Movie>()
             .Distinct();
 
+        Console.WriteLine("=== Movies Watched by Alice ===");
         foreach (var movie in moviesAliceWatched)
         {
-            Console.WriteLine($"Alice watched: {movie.Title} ({movie.ReleaseYear})");
+            Console.WriteLine($"  {movie.Title} ({movie.ReleaseYear})");
         }
 
         var moviesAlicePaidFor = (await graph.NodesAsync<Person>())
@@ -72,10 +87,10 @@ static class Program
             .PathSegments<Person, Paid, CreditCard>()
             .Select(s => new { Movie = s.Relationship.MovieName, CreditCard = s.EndNode });
 
-
+        Console.WriteLine("=== Credit Cards Alice Used ===");
         foreach (var creditCard in moviesAlicePaidFor)
         {
-            Console.WriteLine($"Alice paid for '{creditCard.Movie}' with credit card: {creditCard.CreditCard.Number}, Expiry: {creditCard.CreditCard.Expiry}");
+            Console.WriteLine($"  Paid for '{creditCard.Movie}' with card: {creditCard.CreditCard.Number}, Expiry: {creditCard.CreditCard.Expiry}");
         }
     }
 }
