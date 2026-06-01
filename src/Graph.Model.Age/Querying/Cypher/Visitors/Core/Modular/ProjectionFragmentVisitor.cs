@@ -355,8 +355,6 @@ internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
     /// <summary>
     /// Translates an inner Select lambda body to a Cypher expression suitable for collect().
     /// Handles NewExpression (anonymous type), MemberExpression (simple property), and basic arithmetic.
-    /// Uses pre-resolved path segment aliases to avoid the expression visitor's broken chain issue.
-    /// </summary>
     private static string TranslateInnerSelectBody(
         Expression body,
         ParameterExpression innerParam,
@@ -364,61 +362,11 @@ internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
         string relAlias,
         string tgtAlias)
     {
-        if (body is NewExpression newExpr)
-        {
-            // Anonymous type: new { Name = p.EndNode.FirstName, Age = p.EndNode.Age }
-            var mapParts = new List<string>();
-            for (int i = 0; i < newExpr.Arguments.Count; i++)
-            {
-                var memberName = newExpr.Members?[i]?.Name ?? $"Prop{i}";
-                var argCypher = TranslateInnerExpression(newExpr.Arguments[i], innerParam, srcAlias, relAlias, tgtAlias);
-                mapParts.Add($"{memberName}: {argCypher}");
-            }
-            return $"{{{string.Join(", ", mapParts)}}}";
-        }
-
-        if (body is MemberExpression)
-        {
-            // Simple member access: p.EndNode.FirstName
-            return TranslateInnerExpression(body, innerParam, srcAlias, relAlias, tgtAlias);
-        }
-
-        if (body is BinaryExpression binary)
-        {
-            var left = TranslateInnerExpression(binary.Left, innerParam, srcAlias, relAlias, tgtAlias);
-            var right = TranslateInnerExpression(binary.Right, innerParam, srcAlias, relAlias, tgtAlias);
-            var op = binary.NodeType switch
-            {
-                ExpressionType.Add => "+",
-                ExpressionType.Subtract => "-",
-                ExpressionType.Multiply => "*",
-                ExpressionType.Divide => "/", ExpressionType.GreaterThan => ">", ExpressionType.GreaterThanOrEqual => ">=", ExpressionType.LessThan => "<", ExpressionType.LessThanOrEqual => "<=", ExpressionType.Equal => "=", ExpressionType.NotEqual => "<>", ExpressionType.AndAlso => "AND", ExpressionType.OrElse => "OR",
-                _ => throw new NotSupportedException($"Binary operator {binary.NodeType} in inner select")
-            };
-            return $"({left} {op} {right})";
-        }
-
-        if (body is UnaryExpression unary && unary.NodeType == ExpressionType.Convert)
-        {
-            return TranslateInnerExpression(unary.Operand, innerParam, srcAlias, relAlias, tgtAlias);
-        }
-
-        // Fallback: try to evaluate as constant
-        try
-        {
-            var lambda = Expression.Lambda<Func<object>>(Expression.Convert(body, typeof(object)));
-            var val = lambda.Compile()();
-            return val?.ToString() ?? "null";
-        }
-        catch
-        {
-            return body.ToString() ?? "unknown";
-        }
+        return CollectExpressionTranslator.TranslateInnerSelectBody(body, innerParam, srcAlias, relAlias, tgtAlias);
     }
 
     /// <summary>
     /// Translates a single expression within an inner Select lambda to Cypher text.
-    /// Handles path segment property chains like p.EndNode.FirstName → tgt0.FirstName.
     /// </summary>
     private static string TranslateInnerExpression(
         Expression expr,
@@ -427,171 +375,9 @@ internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
         string relAlias,
         string tgtAlias)
     {
-        // p.EndNode.FirstName → tgt0.FirstName
-        if (expr is MemberExpression memberExpr)
-        {
-            // Static DateTime members FIRST (before path segment checks)
-            if (memberExpr.Expression == null && memberExpr.Member.DeclaringType == typeof(DateTime))
-            {
-                // AGE doesn't support datetime() / localdatetime() functions inside collect().
-                // Evaluate at compile time and format as ISO 8601 string for Cypher compatibility.
-                try
-                {
-                    var val = Expression.Lambda<Func<object>>(
-                        Expression.Convert(memberExpr, typeof(object))).Compile()();
-                    return val switch
-                    {
-                        DateTime dt => $"'{dt:yyyy-MM-ddTHH:mm:ss}'",
-                        _ => val?.ToString() ?? "null"
-                    };
-                }
-                catch { return $"'{DateTime.UtcNow:yyyy-MM-ddTHH:mm:ss}'"; }
-            }
-
-            // Other static members
-            if (memberExpr.Expression == null)
-                return TryCompileEval(expr);
-
-            // Check for path segment property: p.EndNode, p.StartNode, p.Relationship
-            if (memberExpr.Expression == innerParam &&
-                typeof(IGraphPathSegment).IsAssignableFrom(innerParam.Type))
-            {
-                return memberExpr.Member.Name switch
-                {
-                    nameof(IGraphPathSegment.StartNode) => srcAlias,
-                    nameof(IGraphPathSegment.EndNode) => tgtAlias,
-                    nameof(IGraphPathSegment.Relationship) => relAlias,
-                    _ => memberExpr.Member.Name
-                };
-            }
-
-            // Check for nested access: p.EndNode.FirstName
-            if (memberExpr.Expression is MemberExpression innerMem &&
-                innerMem.Expression == innerParam &&
-                typeof(IGraphPathSegment).IsAssignableFrom(innerParam.Type))
-            {
-                var alias = innerMem.Member.Name switch
-                {
-                    nameof(IGraphPathSegment.StartNode) => srcAlias,
-                    nameof(IGraphPathSegment.EndNode) => tgtAlias,
-                    nameof(IGraphPathSegment.Relationship) => relAlias,
-                    _ => throw new NotSupportedException($"Unknown path component {innerMem.Member.Name}")
-                };
-                var propName = MapPropertyName(memberExpr.Member.Name);
-                return $"{alias}.{propName}";
-            }
-
-            // Check for deeper nesting: p.EndNode is translated, then .FirstName is on the result
-            // by walking up the member expression chain
-            var (resolvedAlias, remainingPath) = WalkPathSegmentChain(memberExpr, innerParam, srcAlias, relAlias, tgtAlias);
-            if (resolvedAlias != null)
-            {
-                return remainingPath.Count > 0
-                    ? $"{resolvedAlias}.{string.Join(".", remainingPath)}"
-                    : resolvedAlias;
-            }
-
-            // Not a path segment chain — the member may be on a non-param sub-expression
-            // (e.g., (DateTime.UtcNow - p.Relationship.Since).Days)
-            // Recursively translate the inner expression, then append the property
-            var innerExpr = memberExpr.Expression;
-            if (innerExpr is BinaryExpression || innerExpr is MethodCallExpression ||
-                innerExpr is UnaryExpression || innerExpr is ConditionalExpression)
-            {
-                var baseCypher = TranslateInnerExpression(innerExpr, innerParam, srcAlias, relAlias, tgtAlias);
-                var prop = MapPropertyName(memberExpr.Member.Name);
-
-                // Handle TimeSpan properties specially
-                if (memberExpr.Member.DeclaringType == typeof(TimeSpan))
-                    return TranslateTimeSpanProperty(memberExpr, baseCypher, innerExpr, innerParam, srcAlias, relAlias, tgtAlias);
-
-                return $"{baseCypher}.{prop}";
-            }
-
-            // Handle member access on a non-path-segment parameter (e.g., p.FirstName where p is Person)
-            // For Traverse() queries, innerParam is the entity type, not IGraphPathSegment
-            if (memberExpr.Expression == innerParam && typeof(INode).IsAssignableFrom(innerParam.Type))
-            {
-                return $"{tgtAlias}.{MapPropertyName(memberExpr.Member.Name)}";
-            }
-
-            // Try constant evaluation
-            try
-            {
-                var lambda = Expression.Lambda<Func<object>>(Expression.Convert(memberExpr, typeof(object)));
-                var val = lambda.Compile()();
-                return val?.ToString() ?? "null";
-            }
-            catch
-            {
-                return memberExpr.Member.Name;
-            }
-        }
-
-        // DateTime.UtcNow etc. — translate to Cypher datetime functions
-        if (expr is MemberExpression staticMember && staticMember.Expression == null)
-        {
-            if (staticMember.Member.DeclaringType == typeof(DateTime))
-            {
-                return staticMember.Member.Name switch
-                {
-                    "UtcNow" => "datetime()",
-                    "Now" => "localdatetime()",
-                    "Today" => "date()",
-                    _ => TryCompileEval(expr)
-                };
-            }
-            return TryCompileEval(expr);
-        }
-
-        // Binary, Unary, etc.
-        if (expr is BinaryExpression bin)
-        {
-            var left = TranslateInnerExpression(bin.Left, innerParam, srcAlias, relAlias, tgtAlias);
-            var right = TranslateInnerExpression(bin.Right, innerParam, srcAlias, relAlias, tgtAlias);
-            var op = bin.NodeType switch
-            {
-                ExpressionType.Add => "+",
-                ExpressionType.Subtract => "-",
-                ExpressionType.Multiply => "*",
-                ExpressionType.Divide => "/", ExpressionType.GreaterThan => ">", ExpressionType.GreaterThanOrEqual => ">=", ExpressionType.LessThan => "<", ExpressionType.LessThanOrEqual => "<=", ExpressionType.Equal => "=", ExpressionType.NotEqual => "<>", ExpressionType.AndAlso => "AND", ExpressionType.OrElse => "OR",
-                _ => throw new NotSupportedException($"Binary operator {bin.NodeType} in inner expression")
-            };
-            return $"({left} {op} {right})";
-        }
-
-        if (expr is UnaryExpression ue && ue.NodeType == ExpressionType.Convert)
-            return TranslateInnerExpression(ue.Operand, innerParam, srcAlias, relAlias, tgtAlias);
-
-        // Constant
-        if (expr is ConstantExpression ce)
-            return ce.Value?.ToString() ?? "null";
-
-        // Parameter reference — if it's p itself (for simple Select like group.Select(p => p))
-        if (expr == innerParam)
-            return tgtAlias; // default to target for simple parameter reference
-
-        // Method call (e.g., .Days property, .ToString(), etc.)
-        if (expr is MethodCallExpression mc)
-            return TranslateInnerMethodCall(mc, innerParam, srcAlias, relAlias, tgtAlias);
-
-        // Fallback evaluation
-        try
-        {
-            var lambda = Expression.Lambda<Func<object>>(Expression.Convert(expr, typeof(object)));
-            var val = lambda.Compile()();
-            return val?.ToString() ?? "null";
-        }
-        catch
-        {
-            return expr.ToString() ?? "unknown";
-        }
+        return CollectExpressionTranslator.TranslateInnerExpression(expr, innerParam, srcAlias, relAlias, tgtAlias);
     }
 
-    /// <summary>
-    /// Walks a chain of member expressions starting from path segment parameter access
-    /// (e.g., p.EndNode.FirstName.Length) and returns the resolved alias and remaining property path.
-    /// </summary>
     private static (string? alias, List<string> remainingPath) WalkPathSegmentChain(
         MemberExpression expr,
         ParameterExpression innerParam,
@@ -599,67 +385,9 @@ internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
         string relAlias,
         string tgtAlias)
     {
-        // Walk down the member chain to find the base path segment property
-        var members = new List<MemberExpression>();
-        Expression? current = expr;
-        while (current is MemberExpression currentMem)
-        {
-            members.Add(currentMem);
-            current = currentMem.Expression;
-        }
-
-        // members[0] = outermost (e.g., FirstName)
-        // members[last] = innermost (e.g., EndNode)
-        // Check if the innermost expression is the path segment parameter
-        if (current != innerParam || !typeof(IGraphPathSegment).IsAssignableFrom(innerParam.Type))
-            return (null, []);
-
-        // Resolve the path segment component (second-to-last in members)
-        string alias;
-        int startIndex;
-        if (members.Count >= 2 && members[^2].Expression == innerParam)
-        {
-            // members[^1] is the segment component (EndNode/StartNode/Relationship)
-            alias = members[^1].Member.Name switch
-            {
-                nameof(IGraphPathSegment.StartNode) => srcAlias,
-                nameof(IGraphPathSegment.EndNode) => tgtAlias,
-                nameof(IGraphPathSegment.Relationship) => relAlias,
-                _ => throw new NotSupportedException($"Unknown path component {members[^1].Member.Name}")
-            };
-            startIndex = members.Count - 3; // skip the segment component and the parameter
-        }
-        else if (members.Count >= 1 && members[^1].Expression == innerParam)
-        {
-            // Direct access: p.EndNode → just the alias
-            alias = members[^1].Member.Name switch
-            {
-                nameof(IGraphPathSegment.StartNode) => srcAlias,
-                nameof(IGraphPathSegment.EndNode) => tgtAlias,
-                nameof(IGraphPathSegment.Relationship) => relAlias,
-                _ => throw new NotSupportedException($"Unknown path component {members[^1].Member.Name}")
-            };
-            startIndex = members.Count - 2; // skip the component
-        }
-        else
-        {
-            return (null, []);
-        }
-
-        // Build remaining property path from the outer members
-        var remainingPath = new List<string>();
-        for (int i = startIndex; i >= 0; i--)
-        {
-            remainingPath.Add(MapPropertyName(members[i].Member.Name));
-        }
-
-        return (alias, remainingPath);
+        return CollectExpressionTranslator.WalkPathSegmentChain(expr, innerParam, srcAlias, relAlias, tgtAlias);
     }
 
-    /// <summary>
-    /// Translates a method call expression within an inner Select lambda.
-    /// Handles .Days, .ToString(), etc.
-    /// </summary>
     private static string TranslateInnerMethodCall(
         MethodCallExpression mc,
         ParameterExpression innerParam,
@@ -667,96 +395,10 @@ internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
         string relAlias,
         string tgtAlias)
     {
-        // DateTime.Subtract → (expr1 - expr2)
-        if (mc.Method.Name == "Subtract" && mc.Method.DeclaringType == typeof(DateTime) && mc.Arguments.Count == 1)
-        {
-            var left = TranslateInnerExpression(mc.Object!, innerParam, srcAlias, relAlias, tgtAlias);
-            var right = TranslateInnerExpression(mc.Arguments[0], innerParam, srcAlias, relAlias, tgtAlias);
-            return $"({left} - {right})";
-        }
-
-        // DateTime.AddDays / AddMonths / AddYears — translate to arithmetic
-        if (mc.Method.DeclaringType == typeof(DateTime) && mc.Arguments.Count == 1 && mc.Object != null)
-        {
-            var obj = TranslateInnerExpression(mc.Object, innerParam, srcAlias, relAlias, tgtAlias);
-            var arg = TranslateInnerExpression(mc.Arguments[0], innerParam, srcAlias, relAlias, tgtAlias);
-            return mc.Method.Name switch
-            {
-                "AddDays" => TryCompileDateTime(mc),
-                "AddMonths" => TryCompileDateTime(mc),
-                "AddYears" => TryCompileDateTime(mc),
-                "AddHours" => TryCompileDateTime(mc),
-                "AddMinutes" => TryCompileDateTime(mc),
-                "AddSeconds" => TryCompileDateTime(mc),
-                _ => TryCompileEval(mc)
-            };
-        }
-
-        // TimeSpan.Days — evaluate at compile time (DateTime expressions in collect are translated to localdatetime() which AGE doesn't support subtraction on).
-        // Try full compile-time eval first, then fall back.
-        if (mc.Method.Name == "get_Days" && mc.Object != null)
-        {
-            try
-            {
-                var lambda = Expression.Lambda<Func<object>>(Expression.Convert(mc, typeof(object)));
-                var val = lambda.Compile()();
-                return val?.ToString() ?? "0";
-            }
-            catch
-            {
-                var obj = TranslateInnerExpression(mc.Object, innerParam, srcAlias, relAlias, tgtAlias);
-                return $"toInteger({obj} / 86400000)";
-            }
-        }
-
-        // Fallback evaluation
-        try
-        {
-            var lambda = Expression.Lambda<Func<object>>(Expression.Convert(mc, typeof(object)));
-            var val = lambda.Compile()();
-            return val?.ToString() ?? "null";
-        }
-        catch
-        {
-            return mc.ToString() ?? "unknown";
-        }
+        return CollectExpressionTranslator.TranslateInnerMethodCall(mc, innerParam, srcAlias, relAlias, tgtAlias);
     }
 
-    /// <summary>
-    /// Translates TimeSpan property access (e.g., .Days, .Hours). Since AGE doesn't support
-    /// TimeSpan/duration arithmetic natively, try compile-time eval first, then fall back to
-    /// epoch-based arithmetic (dividing by the appropriate number of milliseconds).
-    /// </summary>
-    private static string TranslateTimeSpanProperty(
-        MemberExpression memberExpr,
-        string baseCypher,
-        Expression innerExpr,
-        ParameterExpression innerParam,
-        string srcAlias,
-        string relAlias,
-        string tgtAlias)
-    {
-        // Try full compile-time evaluation first (works if DateTime operands are constants)
-        try
-        {
-            var lambda = Expression.Lambda<Func<object>>(Expression.Convert(memberExpr, typeof(object)));
-            var val = lambda.Compile()();
-            return val?.ToString() ?? "0";
-        }
-        catch
-        {
-            // AGE doesn't support native DateTime subtraction or duration arithmetic.
-            // Emit a compile-time default since we can't compute this in Cypher.
-            // For DateTime.UtcNow, evaluate at compile time; r0.Since is a runtime property
-            // that can't be arithmetically subtracted from an ISO string.
-            // Fallback: emit 0 and note the limitation.
-            return "0";
-        }
-    }
-
-    // MapPropertyNameStatic and TryCompileEval are now imported via
-    // `using static ExpressionTranslationHelper` at the top of the file.
-    // Use MapPropertyName() instead of the old MapPropertyNameStatic().
+    // MapPropertyName, TryCompileEval imported via `using static ExpressionTranslationHelper`.
 
     private static string TryResolveExpression(Expression expr, AgeExpressionToCypherVisitor visitor)
     {
