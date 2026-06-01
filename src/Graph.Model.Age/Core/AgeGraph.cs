@@ -66,18 +66,16 @@ internal sealed class AgeGraph : IGraph
             throw new ObjectDisposedException(nameof(AgeGraph));
         }
 
-        try
-        {
-            var transaction = graphContext.CreateTransaction();
-            await transaction.BeginTransactionAsync().ConfigureAwait(false);
-            activeTransactions.Add(transaction);
-            return transaction;
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to create AGE transaction");
-            throw new GraphException("Failed to create AGE transaction", ex);
-        }
+        return await GraphOperationHelper.ExecuteAsync(
+            logger,
+            "Failed to create AGE transaction",
+            async () =>
+            {
+                var transaction = graphContext.CreateTransaction();
+                await transaction.BeginTransactionAsync().ConfigureAwait(false);
+                activeTransactions.Add(transaction);
+                return transaction;
+            }).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -100,69 +98,50 @@ internal sealed class AgeGraph : IGraph
     public Task<IGraphNodeQueryable<N>> NodesAsync<N>(IGraphTransaction? transaction = null)
         where N : INode
     {
-        try
-        {
-            logger.LogDebug("Getting nodes queryable for type {NodeType}", typeof(N).Name);
-
-            var provider = new Querying.Linq.Providers.AgeGraphQueryProvider(graphContext, (AgeGraphTransaction?)transaction);
-            var queryable = new Querying.Linq.Queryables.AgeGraphNodeQueryable<N>(provider, graphContext);
-            return Task.FromResult<IGraphNodeQueryable<N>>(queryable);
-        }
-        catch (Exception ex) when (ex is not GraphException)
-        {
-            var message = $"Failed to create nodes queryable for type {typeof(N).Name}";
-            logger.LogError(ex, message);
-            throw new GraphException(message, ex);
-        }
+        return GraphOperationHelper.ExecuteSync(
+            logger,
+            $"Failed to create nodes queryable for type {typeof(N).Name}",
+            () =>
+            {
+                logger.LogDebug("Getting nodes queryable for type {NodeType}", typeof(N).Name);
+                var provider = new Querying.Linq.Providers.AgeGraphQueryProvider(graphContext, (AgeGraphTransaction?)transaction);
+                var queryable = new Querying.Linq.Queryables.AgeGraphNodeQueryable<N>(provider, graphContext);
+                return Task.FromResult<IGraphNodeQueryable<N>>(queryable);
+            });
     }
 
     /// <inheritdoc />
     public Task<IGraphRelationshipQueryable<R>> RelationshipsAsync<R>(IGraphTransaction? transaction = null)
         where R : IRelationship
     {
-        try
-        {
-            logger.LogDebug("Getting relationships queryable for type {RelationshipType}", typeof(R).Name);
-
-            var ageTx = (AgeGraphTransaction?)transaction;
-            var provider = new Querying.Linq.Providers.AgeGraphQueryProvider(graphContext, ageTx);
-            var queryable = new Querying.Linq.Queryables.AgeGraphRelationshipQueryable<R>(provider, graphContext);
-            return Task.FromResult<IGraphRelationshipQueryable<R>>(queryable);
-        }
-        catch (Exception ex) when (ex is not GraphException)
-        {
-            var message = $"Failed to create relationships queryable for type {typeof(R).Name}";
-            logger.LogError(ex, message);
-            throw new GraphException(message, ex);
-        }
+        return GraphOperationHelper.ExecuteSync(
+            logger,
+            $"Failed to create relationships queryable for type {typeof(R).Name}",
+            () =>
+            {
+                logger.LogDebug("Getting relationships queryable for type {RelationshipType}", typeof(R).Name);
+                var ageTx = (AgeGraphTransaction?)transaction;
+                var provider = new Querying.Linq.Providers.AgeGraphQueryProvider(graphContext, ageTx);
+                var queryable = new Querying.Linq.Queryables.AgeGraphRelationshipQueryable<R>(provider, graphContext);
+                return Task.FromResult<IGraphRelationshipQueryable<R>>(queryable);
+            });
     }
 
     /// <inheritdoc />
     public async Task<N> GetNodeAsync<N>(string id, IGraphTransaction? transaction = null, CancellationToken cancellationToken = default)
         where N : INode
     {
-        try
-        {
-            return await TransactionHelpers.ExecuteInTransactionAsync(
+        return await GraphOperationHelper.ExecuteAsync(
+            logger,
+            $"Failed to retrieve node {id} of type {typeof(N).Name}",
+            async () => await TransactionHelpers.ExecuteInTransactionAsync(
                     graphContext,
                     transaction,
                     tx => nodeManager.GetNodeAsync<N>(id, tx, cancellationToken),
                     $"Failed to retrieve node {id} of type {typeof(N).Name}",
                     logger,
                     isReadOnly: true)
-                .ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            var message = $"Failed to retrieve node {id} of type {typeof(N).Name}";
-            logger.LogError(ex, message);
-            if (ex is GraphException)
-            {
-                throw;
-            }
-
-            throw new GraphException(message, ex);
-        }
+                .ConfigureAwait(false)).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -171,28 +150,17 @@ internal sealed class AgeGraph : IGraph
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
 
-        try
-        {
-            return await TransactionHelpers.ExecuteInTransactionAsync(
+        return await GraphOperationHelper.ExecuteAsync(
+            logger,
+            $"Failed to retrieve relationship {id} of type {typeof(R).Name}",
+            async () => await TransactionHelpers.ExecuteInTransactionAsync(
                     graphContext,
                     transaction,
                     tx => relationshipManager.GetRelationshipAsync<R>(id, tx, cancellationToken),
                     $"Failed to retrieve relationship {id} of type {typeof(R).Name}",
                     logger,
                     isReadOnly: true)
-                .ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            var message = $"Failed to retrieve relationship {id} of type {typeof(R).Name}";
-            logger.LogError(ex, message);
-            if (ex is GraphException)
-            {
-                throw;
-            }
-
-            throw new GraphException(message, ex);
-        }
+                .ConfigureAwait(false)).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -205,32 +173,24 @@ internal sealed class AgeGraph : IGraph
             throw new ArgumentException("Node ID cannot be null or empty.", nameof(node));
         }
 
-        try
-        {
-            await TransactionHelpers.ExecuteInTransactionAsync(
-                    graphContext,
-                    transaction,
-                    async tx =>
-                    {
-                        await nodeManager.CreateNodeAsync(node, tx, cancellationToken).ConfigureAwait(false);
-                        return true;
-                    },
-                    $"Failed to create node of type {typeof(N).Name}",
-                    logger,
-                    isReadOnly: false)
-                .ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            var message = $"Failed to create node of type {typeof(N).Name}";
-            logger.LogError(ex, message);
-            if (ex is GraphException)
+        await GraphOperationHelper.ExecuteAsync(
+            logger,
+            $"Failed to create node of type {typeof(N).Name}",
+            async () =>
             {
-                throw;
-            }
-
-            throw new GraphException(message, ex);
-        }
+                await TransactionHelpers.ExecuteInTransactionAsync(
+                        graphContext,
+                        transaction,
+                        async tx =>
+                        {
+                            await nodeManager.CreateNodeAsync(node, tx, cancellationToken).ConfigureAwait(false);
+                            return true;
+                        },
+                        $"Failed to create node of type {typeof(N).Name}",
+                        logger,
+                        isReadOnly: false)
+                    .ConfigureAwait(false);
+            }).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -243,32 +203,24 @@ internal sealed class AgeGraph : IGraph
             throw new ArgumentException("Relationship ID cannot be null or empty.", nameof(relationship));
         }
 
-        try
-        {
-            await TransactionHelpers.ExecuteInTransactionAsync(
-                    graphContext,
-                    transaction,
-                    async tx =>
-                    {
-                        await relationshipManager.CreateRelationshipAsync(relationship, tx, cancellationToken).ConfigureAwait(false);
-                        return true;
-                    },
-                    $"Failed to create relationship of type {typeof(R).Name}",
-                    logger,
-                    isReadOnly: false)
-                .ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            var message = $"Failed to create relationship of type {typeof(R).Name}";
-            logger.LogError(ex, message);
-            if (ex is GraphException)
+        await GraphOperationHelper.ExecuteAsync(
+            logger,
+            $"Failed to create relationship of type {typeof(R).Name}",
+            async () =>
             {
-                throw;
-            }
-
-            throw new GraphException(message, ex);
-        }
+                await TransactionHelpers.ExecuteInTransactionAsync(
+                        graphContext,
+                        transaction,
+                        async tx =>
+                        {
+                            await relationshipManager.CreateRelationshipAsync(relationship, tx, cancellationToken).ConfigureAwait(false);
+                            return true;
+                        },
+                        $"Failed to create relationship of type {typeof(R).Name}",
+                        logger,
+                        isReadOnly: false)
+                    .ConfigureAwait(false);
+            }).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -281,28 +233,17 @@ internal sealed class AgeGraph : IGraph
             throw new ArgumentException("Node ID cannot be null or empty.", nameof(node));
         }
 
-        try
-        {
-            await TransactionHelpers.ExecuteInTransactionAsync(
+        await GraphOperationHelper.ExecuteAsync(
+            logger,
+            $"Failed to update node {node.Id} of type {typeof(N).Name}",
+            async () => await TransactionHelpers.ExecuteInTransactionAsync(
                     graphContext,
                     transaction,
                     tx => nodeManager.UpdateNodeAsync(node, tx, cancellationToken),
                     $"Failed to update node {node.Id} of type {typeof(N).Name}",
                     logger,
                     isReadOnly: false)
-                .ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            var message = $"Failed to update node {node.Id} of type {typeof(N).Name}";
-            logger.LogError(ex, message);
-            if (ex is GraphException)
-            {
-                throw;
-            }
-
-            throw new GraphException(message, ex);
-        }
+                .ConfigureAwait(false)).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -315,28 +256,17 @@ internal sealed class AgeGraph : IGraph
             throw new ArgumentException("Relationship ID cannot be null or empty.", nameof(relationship));
         }
 
-        try
-        {
-            await TransactionHelpers.ExecuteInTransactionAsync(
+        await GraphOperationHelper.ExecuteAsync(
+            logger,
+            $"Failed to update relationship {relationship.Id} of type {typeof(R).Name}",
+            async () => await TransactionHelpers.ExecuteInTransactionAsync(
                     graphContext,
                     transaction,
                     tx => relationshipManager.UpdateRelationshipAsync(relationship, tx, cancellationToken),
                     $"Failed to update relationship {relationship.Id} of type {typeof(R).Name}",
                     logger,
                     isReadOnly: false)
-                .ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            var message = $"Failed to update relationship {relationship.Id} of type {typeof(R).Name}";
-            logger.LogError(ex, message);
-            if (ex is GraphException)
-            {
-                throw;
-            }
-
-            throw new GraphException(message, ex);
-        }
+                .ConfigureAwait(false)).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -344,33 +274,25 @@ internal sealed class AgeGraph : IGraph
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
 
-        try
-        {
-            var deleted = await TransactionHelpers.ExecuteInTransactionAsync(
-                    graphContext,
-                    transaction,
-                    tx => nodeManager.DeleteNodeAsync(id, tx, cascadeDelete, cancellationToken),
-                    $"Failed to delete node {id}",
-                    logger,
-                    isReadOnly: false)
-                .ConfigureAwait(false);
-
-            if (!deleted)
+        await GraphOperationHelper.ExecuteAsync(
+            logger,
+            $"Failed to delete node {id}",
+            async () =>
             {
-                throw new GraphException($"Node {id} was not deleted.");
-            }
-        }
-        catch (Exception ex)
-        {
-            var message = $"Failed to delete node {id}";
-            logger.LogError(ex, message);
-            if (ex is GraphException)
-            {
-                throw;
-            }
+                var deleted = await TransactionHelpers.ExecuteInTransactionAsync(
+                        graphContext,
+                        transaction,
+                        tx => nodeManager.DeleteNodeAsync(id, tx, cascadeDelete, cancellationToken),
+                        $"Failed to delete node {id}",
+                        logger,
+                        isReadOnly: false)
+                    .ConfigureAwait(false);
 
-            throw new GraphException(message, ex);
-        }
+                if (!deleted)
+                {
+                    throw new GraphException($"Node {id} was not deleted.");
+                }
+            }).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -378,105 +300,88 @@ internal sealed class AgeGraph : IGraph
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
 
-        try
-        {
-            var deleted = await TransactionHelpers.ExecuteInTransactionAsync(
-                    graphContext,
-                    transaction,
-                    tx => relationshipManager.DeleteRelationshipAsync(id, tx, cancellationToken),
-                    $"Failed to delete relationship {id}",
-                    logger,
-                    isReadOnly: false)
-                .ConfigureAwait(false);
-
-            if (!deleted)
+        await GraphOperationHelper.ExecuteAsync(
+            logger,
+            $"Failed to delete relationship {id}",
+            async () =>
             {
-                throw new GraphException($"Relationship {id} was not deleted.");
-            }
-        }
-        catch (Exception ex)
-        {
-            var message = $"Failed to delete relationship {id}";
-            logger.LogError(ex, message);
-            if (ex is GraphException)
-            {
-                throw;
-            }
+                var deleted = await TransactionHelpers.ExecuteInTransactionAsync(
+                        graphContext,
+                        transaction,
+                        tx => relationshipManager.DeleteRelationshipAsync(id, tx, cancellationToken),
+                        $"Failed to delete relationship {id}",
+                        logger,
+                        isReadOnly: false)
+                    .ConfigureAwait(false);
 
-            throw new GraphException(message, ex);
-        }
+                if (!deleted)
+                {
+                    throw new GraphException($"Relationship {id} was not deleted.");
+                }
+            }).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
     public async Task<IGraphQueryable<IEntity>> SearchAsync(string query, IGraphTransaction? transaction = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(query, nameof(query));
-        try
-        {
-            logger.LogDebug("Performing AGE full text search on all entities with query: {Query}", query);
+        return await GraphOperationHelper.ExecuteAsync(
+            logger,
+            $"Failed to create search queryable for query: {query}",
+            async () =>
+            {
+                logger.LogDebug("Performing AGE full text search on all entities with query: {Query}", query);
 
-            AgeGraphTransaction? ageTx = transaction != null
-                ? await TransactionHelpers.GetOrCreateTransactionAsync(graphContext, transaction, true)
-                : null;
+                AgeGraphTransaction? ageTx = transaction != null
+                    ? await TransactionHelpers.GetOrCreateTransactionAsync(graphContext, transaction, true)
+                    : null;
 
-            var provider = new AgeGraphQueryProvider(graphContext, ageTx);
-            var searchExpression = new Querying.Linq.Queryables.AgeFullTextSearchExpression(query, typeof(IEntity));
-            return new Querying.Linq.Queryables.AgeGraphQueryable<IEntity>(provider, graphContext, searchExpression);
-        }
-        catch (Exception ex) when (ex is not GraphException)
-        {
-            var message = $"Failed to create search queryable for query: {query}";
-            logger.LogError(ex, message);
-            throw new GraphException(message, ex);
-        }
+                var provider = new AgeGraphQueryProvider(graphContext, ageTx);
+                var searchExpression = new Querying.Linq.Queryables.AgeFullTextSearchExpression(query, typeof(IEntity));
+                return (IGraphQueryable<IEntity>)new Querying.Linq.Queryables.AgeGraphQueryable<IEntity>(provider, graphContext, searchExpression);
+            }).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
     public async Task<IGraphNodeQueryable<INode>> SearchNodesAsync(string query, IGraphTransaction? transaction = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(query, nameof(query));
-        try
-        {
-            logger.LogDebug("Performing AGE full text search on nodes with query: {Query}", query);
+        return await GraphOperationHelper.ExecuteAsync(
+            logger,
+            $"Failed to create node search queryable for query: {query}",
+            async () =>
+            {
+                logger.LogDebug("Performing AGE full text search on nodes with query: {Query}", query);
 
-            AgeGraphTransaction? ageTx = transaction != null
-                ? await TransactionHelpers.GetOrCreateTransactionAsync(graphContext, transaction, true)
-                : null;
+                AgeGraphTransaction? ageTx = transaction != null
+                    ? await TransactionHelpers.GetOrCreateTransactionAsync(graphContext, transaction, true)
+                    : null;
 
-            var provider = new AgeGraphQueryProvider(graphContext, ageTx);
-            var searchExpression = new Querying.Linq.Queryables.AgeFullTextSearchExpression(query, typeof(INode));
-            return new Querying.Linq.Queryables.AgeGraphNodeQueryable<INode>(provider, graphContext, searchExpression);
-        }
-        catch (Exception ex) when (ex is not GraphException)
-        {
-            var message = $"Failed to create node search queryable for query: {query}";
-            logger.LogError(ex, message);
-            throw new GraphException(message, ex);
-        }
+                var provider = new AgeGraphQueryProvider(graphContext, ageTx);
+                var searchExpression = new Querying.Linq.Queryables.AgeFullTextSearchExpression(query, typeof(INode));
+                return (IGraphNodeQueryable<INode>)new Querying.Linq.Queryables.AgeGraphNodeQueryable<INode>(provider, graphContext, searchExpression);
+            }).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
     public async Task<IGraphRelationshipQueryable<IRelationship>> SearchRelationshipsAsync(string query, IGraphTransaction? transaction = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(query, nameof(query));
-        try
-        {
-            logger.LogDebug("Performing AGE full text search on relationships with query: {Query}", query);
+        return await GraphOperationHelper.ExecuteAsync(
+            logger,
+            $"Failed to create relationship search queryable for query: {query}",
+            async () =>
+            {
+                logger.LogDebug("Performing AGE full text search on relationships with query: {Query}", query);
 
-            AgeGraphTransaction? ageTx = transaction != null
-                ? await TransactionHelpers.GetOrCreateTransactionAsync(graphContext, transaction, true)
-                : null;
+                AgeGraphTransaction? ageTx = transaction != null
+                    ? await TransactionHelpers.GetOrCreateTransactionAsync(graphContext, transaction, true)
+                    : null;
 
-            var provider = new AgeGraphQueryProvider(graphContext, ageTx);
-            var searchExpression = new Querying.Linq.Queryables.AgeFullTextSearchExpression(query, typeof(IRelationship));
-            return new Querying.Linq.Queryables.AgeGraphRelationshipQueryable<IRelationship>(provider, graphContext, searchExpression);
-        }
-        catch (Exception ex) when (ex is not GraphException)
-        {
-            var message = $"Failed to create relationship search queryable for query: {query}";
-            logger.LogError(ex, message);
-            throw new GraphException(message, ex);
-        }
+                var provider = new AgeGraphQueryProvider(graphContext, ageTx);
+                var searchExpression = new Querying.Linq.Queryables.AgeFullTextSearchExpression(query, typeof(IRelationship));
+                return (IGraphRelationshipQueryable<IRelationship>)new Querying.Linq.Queryables.AgeGraphRelationshipQueryable<IRelationship>(provider, graphContext, searchExpression);
+            }).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -484,24 +389,21 @@ internal sealed class AgeGraph : IGraph
         where T : INode
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(query, nameof(query));
-        try
-        {
-            logger.LogDebug("Performing AGE full text search on nodes of type {NodeType} with query: {Query}", typeof(T).Name, query);
+        return await GraphOperationHelper.ExecuteAsync(
+            logger,
+            $"Failed to create typed node search queryable for type {typeof(T).Name} and query: {query}",
+            async () =>
+            {
+                logger.LogDebug("Performing AGE full text search on nodes of type {NodeType} with query: {Query}", typeof(T).Name, query);
 
-            AgeGraphTransaction? ageTx = transaction != null
-                ? await TransactionHelpers.GetOrCreateTransactionAsync(graphContext, transaction, true)
-                : null;
+                AgeGraphTransaction? ageTx = transaction != null
+                    ? await TransactionHelpers.GetOrCreateTransactionAsync(graphContext, transaction, true)
+                    : null;
 
-            var provider = new AgeGraphQueryProvider(graphContext, ageTx);
-            var searchExpression = new Querying.Linq.Queryables.AgeFullTextSearchExpression(query, typeof(T));
-            return new Querying.Linq.Queryables.AgeGraphNodeQueryable<T>(provider, graphContext, searchExpression);
-        }
-        catch (Exception ex) when (ex is not GraphException)
-        {
-            var message = $"Failed to create typed node search queryable for type {typeof(T).Name} and query: {query}";
-            logger.LogError(ex, message);
-            throw new GraphException(message, ex);
-        }
+                var provider = new AgeGraphQueryProvider(graphContext, ageTx);
+                var searchExpression = new Querying.Linq.Queryables.AgeFullTextSearchExpression(query, typeof(T));
+                return (IGraphNodeQueryable<T>)new Querying.Linq.Queryables.AgeGraphNodeQueryable<T>(provider, graphContext, searchExpression);
+            }).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -509,24 +411,21 @@ internal sealed class AgeGraph : IGraph
         where T : IRelationship
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(query, nameof(query));
-        try
-        {
-            logger.LogDebug("Performing AGE full text search on relationships of type {RelType} with query: {Query}", typeof(T).Name, query);
+        return await GraphOperationHelper.ExecuteAsync(
+            logger,
+            $"Failed to create typed relationship search queryable for type {typeof(T).Name} and query: {query}",
+            async () =>
+            {
+                logger.LogDebug("Performing AGE full text search on relationships of type {RelType} with query: {Query}", typeof(T).Name, query);
 
-            AgeGraphTransaction? ageTx = transaction != null
-                ? await TransactionHelpers.GetOrCreateTransactionAsync(graphContext, transaction, true)
-                : null;
+                AgeGraphTransaction? ageTx = transaction != null
+                    ? await TransactionHelpers.GetOrCreateTransactionAsync(graphContext, transaction, true)
+                    : null;
 
-            var provider = new AgeGraphQueryProvider(graphContext, ageTx);
-            var searchExpression = new Querying.Linq.Queryables.AgeFullTextSearchExpression(query, typeof(T));
-            return new Querying.Linq.Queryables.AgeGraphRelationshipQueryable<T>(provider, graphContext, searchExpression);
-        }
-        catch (Exception ex) when (ex is not GraphException)
-        {
-            var message = $"Failed to create typed relationship search queryable for type {typeof(T).Name} and query: {query}";
-            logger.LogError(ex, message);
-            throw new GraphException(message, ex);
-        }
+                var provider = new AgeGraphQueryProvider(graphContext, ageTx);
+                var searchExpression = new Querying.Linq.Queryables.AgeFullTextSearchExpression(query, typeof(T));
+                return (IGraphRelationshipQueryable<T>)new Querying.Linq.Queryables.AgeGraphRelationshipQueryable<T>(provider, graphContext, searchExpression);
+            }).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
