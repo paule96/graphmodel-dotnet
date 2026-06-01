@@ -708,295 +708,32 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
     /// </summary>
     private string TranslateForCollect(Expression body, ParameterExpression param)
     {
-        if (body is NewExpression newExpr)
-        {
-            var parts = new List<string>();
-            for (int i = 0; i < newExpr.Arguments.Count; i++)
-            {
-                var name = newExpr.Members?[i]?.Name ?? $"Prop{i}";
-                var val = TranslateExpressionForCollect(newExpr.Arguments[i], param);
-                parts.Add($"{name}: {val}");
-            }
-            return $"{{{string.Join(", ", parts)}}}";
-        }
-
-        if (body is MemberExpression)
-            return TranslateExpressionForCollect(body, param);
-
-        if (body is BinaryExpression)
-            return TranslateExpressionForCollect(body, param);
-
-        if (body is MethodCallExpression)
-            return TranslateExpressionForCollect(body, param);
-
-        // Fallback: try to evaluate as constant
-        try
-        {
-            var lambda = Expression.Lambda<Func<object>>(Expression.Convert(body, typeof(object)));
-            var val = lambda.Compile()();
-            return val?.ToString() ?? "null";
-        }
-        catch
-        {
-            return body.ToString() ?? "unknown";
-        }
+        return CollectExpressionTranslator.TranslateInnerSelectBody(
+            body, param,
+            _sourceAlias ?? "src0",
+            _relationshipAlias ?? "r0",
+            _targetAlias ?? "tgt0");
     }
 
     /// <summary>
     /// Top-down translation of a single expression within an inner Select lambda.
-    /// Resolves path segment property chains (e.g., p.EndNode.FirstName → tgt0.FirstName),
-    /// arithmetic, method calls, DateTime static members, and constants.
     /// </summary>
     private string TranslateExpressionForCollect(Expression expr, ParameterExpression param)
     {
-        // Member access — could be p.EndNode.FirstName or p.EndNode or DateTime.UtcNow
-        if (expr is MemberExpression mem)
-        {
-            // Static member? (e.g., DateTime.UtcNow) — evaluate at compile time
-            if (mem.Expression == null)
-            {
-                try
-                {
-                    var lambda = Expression.Lambda<Func<object>>(Expression.Convert(mem, typeof(object)));
-                    var val = lambda.Compile()();
-                    return val switch
-                    {
-                        DateTime dt => $"'{dt:yyyy-MM-ddTHH:mm:ss}'",
-                        _ => val?.ToString() ?? "null"
-                    };
-                }
-                catch { return TryCompileEval(expr); }
-            }
-
-            // Walk the member chain to find the base
-            var chain = new List<string>();
-            Expression? current = mem;
-            while (current is MemberExpression cm)
-            {
-                chain.Insert(0, MapPropertyName(cm.Member.Name));
-                current = cm.Expression;
-            }
-
-            // Check if base is param (path segment) or a path segment component
-            if (current == param && typeof(IGraphPathSegment).IsAssignableFrom(param.Type))
-            {
-                // chain = ["EndNode", "FirstName"] → resolve EndNode to alias, keep rest
-                // chain = ["EndNode"] → just the alias
-                if (chain.Count > 0)
-                {
-                    var component = chain[0];
-                    var alias = component switch
-                    {
-                        "StartNode" => _sourceAlias ?? "src0",
-                        "EndNode" => _targetAlias ?? "tgt0",
-                        "Relationship" => _relationshipAlias ?? "r0",
-                        _ => _alias ?? "src0"
-                    };
-
-                    if (chain.Count == 1)
-                        return alias;
-
-                    return $"{alias}.{string.Join(".", chain.Skip(1))}";
-                }
-                return _targetAlias ?? "tgt0";
-            }
-
-            // Check for path segment chain: param.PathProp.NodeProp (e.g., p.EndNode.FirstName)
-            // where chain might be ["EndNode", "FirstName"] but EndNode returns alias, FirstName is a real prop
-            if (current is MemberExpression pathPartMem && pathPartMem.Expression == param &&
-                typeof(IGraphPathSegment).IsAssignableFrom(param.Type))
-            {
-                var pathPart = MapPropertyName(pathPartMem.Member.Name);
-                var alias = pathPart switch
-                {
-                    "StartNode" => _sourceAlias ?? "src0",
-                    "EndNode" => _targetAlias ?? "tgt0",
-                    "Relationship" => _relationshipAlias ?? "r0",
-                    _ => _alias ?? "src0"
-                };
-
-                // chain[0] is the path part (already resolved to alias)
-                // The rest are property names on that alias
-                if (chain.Count > 1)
-                    return $"{alias}.{string.Join(".", chain.Skip(1))}";
-                return alias;
-            }
-
-            // Not a path segment — the member may be on a non-param sub-expression
-            // (e.g., (DateTime.UtcNow - p.Relationship.Since).Days)
-            // Recursively translate the inner expression, then append the property
-            var innerExpr = mem.Expression;
-            if (innerExpr is BinaryExpression || innerExpr is MethodCallExpression ||
-                innerExpr is UnaryExpression || innerExpr is ConditionalExpression)
-            {
-                var baseCypher = TranslateExpressionForCollect(innerExpr, param);
-                var prop = MapPropertyName(mem.Member.Name);
-
-                // Handle TimeSpan properties
-                if (mem.Member.DeclaringType == typeof(TimeSpan))
-                {
-                    try
-                    {
-                        var evalLambda = Expression.Lambda<Func<object>>(Expression.Convert(expr, typeof(object)));
-                        var val = evalLambda.Compile()();
-                        return val?.ToString() ?? "0";
-                    }
-                    catch
-                    {
-                        return mem.Member.Name switch
-                        {
-                            "Days" => $"toInteger({baseCypher} / 86400000)",
-                            "Hours" => $"toInteger({baseCypher} / 3600000)",
-                            "Minutes" => $"toInteger({baseCypher} / 60000)",
-                            "Seconds" => $"toInteger({baseCypher} / 1000)",
-                            _ => $"{baseCypher}.{prop}"
-                        };
-                    }
-                }
-
-                return $"{baseCypher}.{prop}";
-            }
-
-            // Handle member access on a non-path-segment parameter (e.g., p.FirstName where p is Person)
-            if (mem.Expression == param && typeof(INode).IsAssignableFrom(param.Type))
-            {
-                var nonPathAlias = _targetAlias ?? _alias ?? "src0";
-                return $"{nonPathAlias}.{MapPropertyName(mem.Member.Name)}";
-            }
-
-            // Not a path segment — try constant eval
-            try
-            {
-                var lambda = Expression.Lambda<Func<object>>(Expression.Convert(expr, typeof(object)));
-                var val = lambda.Compile()();
-                return val?.ToString() ?? "null";
-            }
-            catch { return expr.ToString() ?? "unknown"; }
-        }
-
-        // Binary arithmetic
-        if (expr is BinaryExpression bin)
-        {
-            var left = TranslateExpressionForCollect(bin.Left, param);
-            var right = TranslateExpressionForCollect(bin.Right, param);
-            var op = bin.NodeType switch
-            {
-                ExpressionType.Add => "+",
-                ExpressionType.Subtract => "-",
-                ExpressionType.Multiply => "*",
-                ExpressionType.Divide => "/",
-                ExpressionType.AndAlso => "AND",
-                ExpressionType.OrElse => "OR",
-                ExpressionType.Equal => "=",
-                ExpressionType.NotEqual => "<>",
-                ExpressionType.GreaterThan => ">",
-                ExpressionType.GreaterThanOrEqual => ">=",
-                ExpressionType.LessThan => "<",
-                ExpressionType.LessThanOrEqual => "<=",
-                _ => throw new NotSupportedException($"Binary operator {bin.NodeType} in inner expression")
-            };
-            return $"({left} {op} {right})";
-        }
-
-        // Unary (Convert)
-        if (expr is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } un)
-            return TranslateExpressionForCollect(un.Operand, param);
-
-        // NOT
-        if (expr is UnaryExpression { NodeType: ExpressionType.Not } notExpr)
-            return $"NOT ({TranslateExpressionForCollect(notExpr.Operand, param)})";
-
-        // Conditional (ternary)
-        if (expr is ConditionalExpression cond)
-        {
-            var test = TranslateExpressionForCollect(cond.Test, param);
-            var ifTrue = TranslateExpressionForCollect(cond.IfTrue, param);
-            var ifFalse = TranslateExpressionForCollect(cond.IfFalse, param);
-            return $"CASE WHEN {test} THEN {ifTrue} ELSE {ifFalse} END";
-        }
-
-        // Constant
-        if (expr is ConstantExpression ce)
-            return ce.Value?.ToString() ?? "null";
-
-        // Method calls
-        if (expr is MethodCallExpression mc)
-            return TranslateMethodForCollect(mc, param);
-
-        // Parameter reference (e.g., p itself in a simple Select like group.Select(p => p))
-        if (expr == param)
-            return _targetAlias ?? "tgt0";
-
-        // Fallback
-        try
-        {
-            var lambda = Expression.Lambda<Func<object>>(Expression.Convert(expr, typeof(object)));
-            var val = lambda.Compile()();
-            return val?.ToString() ?? "null";
-        }
-        catch { return expr.ToString() ?? "unknown"; }
+        return CollectExpressionTranslator.TranslateInnerExpression(
+            expr, param,
+            _sourceAlias ?? "src0",
+            _relationshipAlias ?? "r0",
+            _targetAlias ?? "tgt0");
     }
 
-    /// <summary>
-    /// Translates a method call within a collect expression. Handles .Subtract (DateTime),
-    /// .Days (TimeSpan), .ToLower/.ToUpper/.Trim (string).
-    /// For AGE, DateTime arithmetic uses localdatetime() for Now, and durations
-    /// are computed using epoch millisecond arithmetic (toInteger((a - b) / 86400000) for Days).
-    /// </summary>
     private string TranslateMethodForCollect(MethodCallExpression mc, ParameterExpression param)
     {
-        // DateTime.Subtract → (expr1 - expr2) — just emit the subtraction in Cypher
-        if (mc.Method.Name == "Subtract" && mc.Method.DeclaringType == typeof(DateTime) && mc.Arguments.Count == 1 && mc.Object != null)
-        {
-            var left = TranslateExpressionForCollect(mc.Object, param);
-            var right = TranslateExpressionForCollect(mc.Arguments[0], param);
-            return $"({left} - {right})";
-        }
-
-        // TimeSpan.Days — in AGE, compute as toInteger((a - b) / 86400000) since AGE datetime
-        // subtraction returns epoch milliseconds. Use epochMs? Actually AGE's result may vary.
-        // Simpler approach: try compile-time eval first, fall back to epoch-based arithmetic.
-        if (mc.Method.Name == "get_Days" && mc.Object != null)
-        {
-            try
-            {
-                var lambda = Expression.Lambda<Func<object>>(Expression.Convert(mc, typeof(object)));
-                var val = lambda.Compile()();
-                return val?.ToString() ?? "0";
-            }
-            catch
-            {
-                // Fallback: translate the object expression and wrap in toInteger division
-                // AGE datetime subtraction produces a duration; Days = duration / milliseconds in day
-                var obj = TranslateExpressionForCollect(mc.Object, param);
-                // If the object is a subtraction of two localdatetime() expressions,
-                // AGE might produce a bigint in microseconds or milliseconds.
-                // Use toInteger on the division result.
-                return $"toInteger({obj} / 86400000)";
-            }
-        }
-
-        // String methods
-        if (mc.Method.DeclaringType == typeof(string) && mc.Object != null)
-        {
-            var obj = TranslateExpressionForCollect(mc.Object, param);
-            return mc.Method.Name switch
-            {
-                "ToLower" when mc.Arguments.Count == 0 => $"toLower({obj})",
-                "ToUpper" when mc.Arguments.Count == 0 => $"toUpper({obj})",
-                "Trim" when mc.Arguments.Count == 0 => $"trim({obj})",
-                _ => obj
-            };
-        }
-
-        // Fallback evaluation
-        try
-        {
-            var lambda = Expression.Lambda<Func<object>>(Expression.Convert(mc, typeof(object)));
-            var val = lambda.Compile()();
-            return val?.ToString() ?? "null";
-        }
-        catch { return mc.ToString() ?? "unknown"; }
+        return CollectExpressionTranslator.TranslateInnerMethodCall(
+            mc, param,
+            _sourceAlias ?? "src0",
+            _relationshipAlias ?? "r0",
+            _targetAlias ?? "tgt0");
     }
 
     /// <summary>
