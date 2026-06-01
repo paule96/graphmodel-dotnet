@@ -434,7 +434,7 @@ internal sealed class AgeCypherEngine
         if (!typeof(INode).IsAssignableFrom(elementType) && !typeof(IRelationship).IsAssignableFrom(elementType)
             && !isPathSegmentType && !isProjection)
         {
-            return await MaterializeScalarResultAsync<T>(reader, elementType, cancellationToken, aggregationType).ConfigureAwait(false);
+            return await ScalarResultMaterializer.MaterializeAsync<T>(reader, elementType, cancellationToken, aggregationType).ConfigureAwait(false);
         }
 
         // Use AgeResultProcessor to convert raw results to EntityInfo structures
@@ -445,55 +445,7 @@ internal sealed class AgeCypherEngine
         return await _sharedMaterializer.MaterializeAsync<T>(entityInfos, cancellationToken);
     }
 
-    private static async Task<T?> MaterializeScalarResultAsync<T>(
-        NpgsqlDataReader reader, Type elementType, CancellationToken cancellationToken,
-        string? aggregationType = null)
-    {
-        var results = new List<object?>();
-
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            // Handle DBNull (e.g., SUM/AVG of empty set returns a single NULL row)
-            if (await reader.IsDBNullAsync(0, cancellationToken).ConfigureAwait(false))
-            {
-                // Average of empty set should throw InvalidOperationException
-                if (string.Equals(aggregationType, "Average", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new InvalidOperationException("Sequence contains no elements");
-                }
-                // Sum/Min/Max of empty set returns null, which defaults to 0/default
-                results.Add(null);
-                continue;
-            }
-
-            var agVal = reader.GetFieldValue<Agtype>(0);
-            object? rawValue = null;
-
-            // Use Agtype's native accessor methods based on target type
-            if (elementType == typeof(string)) { try { rawValue = agVal.GetString(); } catch { rawValue = agVal.ToString(); } }
-            else if (elementType == typeof(long) || elementType == typeof(long?)) { try { rawValue = agVal.GetInt64(); } catch { } }
-            else if (elementType == typeof(int) || elementType == typeof(int?))
-            {
-                // count(*) in AGE returns bigint (Int64). Try Int32 first, then fall back to Int64 and cast.
-                try { rawValue = agVal.GetInt32(); }
-                catch { try { rawValue = (int)agVal.GetInt64(); } catch { } }
-            }
-            else if (elementType == typeof(short) || elementType == typeof(short?)) { try { rawValue = agVal.GetInt16(); } catch { } }
-            else if (elementType == typeof(double) || elementType == typeof(double?)) { try { rawValue = agVal.GetDouble(); } catch { } }
-            else if (elementType == typeof(float) || elementType == typeof(float?)) { try { rawValue = agVal.GetFloat(); } catch { } }
-            else if (elementType == typeof(decimal) || elementType == typeof(decimal?)) { try { rawValue = agVal.GetDecimal(); } catch { } }
-            else if (elementType == typeof(bool) || elementType == typeof(bool?)) { try { rawValue = agVal.GetBoolean(); } catch { } }
-            else if (elementType == typeof(byte)) { try { rawValue = agVal.GetByte(); } catch { } }
-            else { try { rawValue = agVal.GetString() ?? agVal.ToString(); } catch { rawValue = agVal.ToString(); } }
-
-            if (rawValue is null)
-                rawValue = agVal.ToString();
-
-            results.Add(rawValue);
-        }
-
-        return CollectionHelper.ToListOrSingle<T>(results, elementType);
-    }
+    // MaterializeScalarResultAsync moved to ScalarResultMaterializer.MaterializeAsync
 
     private static bool IsAnonymousType(Type type) =>
         type.IsGenericType
