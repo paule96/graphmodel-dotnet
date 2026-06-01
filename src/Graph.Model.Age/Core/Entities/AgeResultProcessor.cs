@@ -173,21 +173,21 @@ internal sealed class AgeResultProcessor
                 if (agVal.IsVertex)
                 {
                     var vertex = agVal.GetVertex();
-                    var nestedTarget = elementType.GetProperty(propertyName)?.PropertyType ?? typeof(object);
+                    var nestedTarget = elementType.GetProperty(propertyName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)?.PropertyType ?? typeof(object);
                     var nestedEntityInfo = _entityMapper.MapVertex(vertex, nestedTarget);
                     complexProps[propertyName] = new Property(null!, propertyName, false, nestedEntityInfo);
                 }
                 else if (agVal.IsEdge)
                 {
                     var edge = agVal.GetEdge();
-                    var nestedTarget = elementType.GetProperty(propertyName)?.PropertyType ?? typeof(object);
+                    var nestedTarget = elementType.GetProperty(propertyName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)?.PropertyType ?? typeof(object);
                     var nestedEntityInfo = _entityMapper.MapEdge(edge, nestedTarget);
                     complexProps[propertyName] = new Property(null!, propertyName, false, nestedEntityInfo);
                 }
                 else
                 {
                     // Determine target type from elementType's matching property
-                    var targetProp = elementType.GetProperty(propertyName);
+                    var targetProp = elementType.GetProperty(propertyName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase);
                     var targetType = targetProp?.PropertyType ?? typeof(string);
                     object? convertedValue = null;
 
@@ -209,32 +209,19 @@ internal sealed class AgeResultProcessor
                                 var typedList = new List<object?>();
                                 foreach (var rawElem in agList)
                                 {
-                                    // GetList() may return raw objects, Agtype wrappers, or JsonElement objects.
-                                    object? elemObj = null;
-                                    if (rawElem is Agtype agElem)
+                                    // In Konnektr 2.x, GetList() returns typed .NET objects directly
+                                    // (not Agtype wrappers). Vertex/Edge objects, dictionaries,
+                                    // and scalar values arrive pre-typed.
+                                    object? elemObj = rawElem switch
                                     {
-                                        elemObj = ConvertSingleAgtypeElement(agElem, listElementType);
-                                    }
-                                    else if (rawElem is System.Text.Json.JsonElement jsonElem)
-                                    {
-                                        // AGE returns collect() element maps as JsonElement values
-                                        elemObj = ConvertJsonElementToEntityInfo(jsonElem, listElementType);
-                                    }
-                                    else if (rawElem != null)
-                                    {
-                                        // Wrap in Agtype to use UnifiedAgtypeValue for access
-                                        try
-                                        {
-                                            var wrapObj = new Agtype(rawElem.ToString()!);
-                                            elemObj = ConvertSingleAgtypeElement(wrapObj, listElementType);
-                                        }
-                                        catch (Exception wrapEx)
-                                        {
-                                            _logger.LogWarning(wrapEx, "ReadMultiColumnRowAsync: Failed to wrap Agtype list element for {Prop}, raw type={RawType}", propertyName, rawElem.GetType().Name);
-                                            // Fall back to string conversion
-                                            elemObj = ConvertScalarAgtype(rawElem.ToString() ?? string.Empty, listElementType);
-                                        }
-                                    }
+                                        null => null,
+                                        Vertex<Dictionary<string, object>> v => v,
+                                        Edge<Dictionary<string, object>> e => e,
+                                        Dictionary<string, object> dict => ConvertDictionaryToType(dict!, listElementType),
+                                        System.Text.Json.JsonElement jsonElem =>
+                                            ConvertJsonElementToEntityInfo(jsonElem, listElementType),
+                                        _ => rawElem // scalar value, already correct type
+                                    };
                                     typedList.Add(elemObj);
                                 }
                                 convertedValue = typedList;
@@ -293,9 +280,46 @@ internal sealed class AgeResultProcessor
                         catch { /* ignore */ }
                     }
 
+                    // If still null and target is a complex type, try JSON deserialization.
+                    // In Konnektr 2.x, the InferredObjectConverter pre-deserializes objects as
+                    // Dictionary<string, object>, but in the query result path, complex property
+                    // values may arrive as Agtype containing a JSON map. Deserialize it to the
+                    // target C# type so the generated serializer can process it as a SimpleValue.
+                    if (convertedValue == null && targetType != null && targetType != typeof(string)
+                        && !GraphDataModel.IsSimple(targetType)
+                        && !typeof(System.Collections.IDictionary).IsAssignableFrom(targetType))
+                    {
+                        try
+                        {
+                            var text = agVal.ToString();
+                            if (!string.IsNullOrEmpty(text) && text.TrimStart().StartsWith("{"))
+                            {
+                                var result = System.Text.Json.JsonSerializer.Deserialize(
+                                    text, targetType,
+                                    new System.Text.Json.JsonSerializerOptions
+                                    {
+                                        PropertyNameCaseInsensitive = true
+                                    });
+                                if (result != null)
+                                {
+                                    convertedValue = result;
+                                    _logger.LogDebug("ReadMultiColumnRowAsync: Deserialized Agtype map to {Target} for property {Prop}",
+                                        targetType.Name, propertyName);
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "ReadMultiColumnRowAsync: Failed to deserialize complex property {Prop} to {Target}",
+                                propertyName, targetType.Name);
+                        }
+                    }
+
                     // If still null, try parsing from the string representation
-                    if (convertedValue == null)
+                    if (convertedValue == null && targetType != null)
                         convertedValue = ConvertScalarAgtype(agVal.ToString() ?? string.Empty, targetType);
+                    else if (convertedValue == null)
+                        convertedValue = agVal.ToString();
 
                     if (convertedValue != null)
                         simpleProps[propertyName] = new Property(null!, propertyName, false,
@@ -347,7 +371,7 @@ internal sealed class AgeResultProcessor
                 }
 
                 // Determine the target path segment type from elementType
-                var segmentTargetType = elementType.GetProperty(baseKey)?.PropertyType
+                var segmentTargetType = elementType.GetProperty(baseKey, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)?.PropertyType
                     ?? typeof(object);
 
                 var segmentEntityInfo = new EntityInfo(
@@ -370,6 +394,33 @@ internal sealed class AgeResultProcessor
             Array.Empty<string>(),
             simpleProps,
             complexProps);
+    }
+
+    /// <summary>
+    /// Converts a Dictionary&lt;string, object?&gt; to the specified target type via JSON round-trip.
+    /// Used when Konnektr 2.x returns complex property values as pre-deserialized dictionaries
+    /// instead of raw Agtype strings, but the generated serializer expects the actual C# type.
+    /// </summary>
+    private static object? ConvertDictionaryToType(Dictionary<string, object> dict, Type targetType)
+    {
+        if (dict == null || dict.Count == 0)
+            return null;
+
+        try
+        {
+            var json = System.Text.Json.JsonSerializer.Serialize(dict);
+            var result = System.Text.Json.JsonSerializer.Deserialize(json, targetType,
+                new System.Text.Json.JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+            return result;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.Fail($"Failed to convert Dictionary to {targetType.Name}: {ex.Message}");
+            return null;
+        }
     }
 
     private static object? ConvertScalarAgtype(string agTypeStr, Type targetType)

@@ -439,6 +439,31 @@ internal sealed class AgeEntityMapper
             if (effectiveType == typeof(decimal) && decimal.TryParse(strVal, NumberStyles.Any, CultureInfo.InvariantCulture, out var decVal)) return decVal;
         }
 
+        // Konnektr 2.x: complex property values arrive as Dictionary<string, object>
+        // from InferredObjectConverter. Convert them to the target C# type so the
+        // generated serializer receives them as SimpleValue (which it expects for
+        // simple POCOs like Point). For non-simple types (like MemorySource), leave
+        // as dictionary so the IDictionary check in MapVertex stores it as an
+        // EntityInfo that the generated complex serializer can process.
+        if (value is IDictionary<string, object?> dict
+            && effectiveType != typeof(IDictionary<string, object>)
+            && effectiveType != typeof(Dictionary<string, object>)
+            && GraphDataModel.IsSimple(effectiveType))
+        {
+            try
+            {
+                var json = JsonSerializer.Serialize(dict);
+                var result = JsonSerializer.Deserialize(json, effectiveType,
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                if (result != null)
+                    return result;
+            }
+            catch
+            {
+                // Fall through — the dictionary will be handled below
+            }
+        }
+
         // Handle numeric type conversions for edge entity property values
         // that come from AGE as types different from the target CLR type
         // (e.g., AGE returns Decimal for numeric properties, target expects double).

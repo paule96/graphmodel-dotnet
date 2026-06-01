@@ -41,7 +41,11 @@ internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
             for (int i = 0; i < newExpr.Arguments.Count; i++)
             {
                 var propertyExpr = newExpr.Arguments[i];
-                var propertyName = newExpr.Members?[i].Name ?? $"Prop{i}";
+                // When Members is null (named record types like `new Foo(x, y)`),
+                // extract parameter names from the constructor via reflection so column
+                // aliases match the record's constructor parameter names (e.g., "Since", "EndNode")
+                // instead of falling back to "Prop0", "Prop1" etc.
+                var propertyName = newExpr.Members?[i].Name ?? GetNewExpressionParameterName(newExpr, i) ?? $"Prop{i}";
                 var cypherAlias = $"c_{propertyName}";
 
                 if (propertyExpr is MemberExpression member && member.Expression is ParameterExpression)
@@ -821,5 +825,16 @@ internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
             };
         }
         catch { return "null"; }
+    }
+
+    private static string? GetNewExpressionParameterName(NewExpression newExpr, int parameterIndex)
+    {
+        var constructor = newExpr.Type.GetConstructors().FirstOrDefault();
+        if (constructor == null)
+            return null;
+        var parameters = constructor.GetParameters();
+        if (parameterIndex < 0 || parameterIndex >= parameters.Length)
+            return null;
+        return parameters[parameterIndex].Name;
     }
 }

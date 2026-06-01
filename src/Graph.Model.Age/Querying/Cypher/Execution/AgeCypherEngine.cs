@@ -562,7 +562,11 @@ internal sealed class AgeCypherEngine
             for (int i = 0; i < newExpr.Arguments.Count; i++)
             {
                 var member = newExpr.Members?[i];
-                var columnName = member?.Name ?? $"field{i}";
+                // When Members is null (named record types like `new Foo(x, y)`),
+                // extract parameter names from the constructor via reflection so column
+                // aliases match the record's parameter names (e.g., "Since", "EndNode")
+                // instead of falling back to "field0", "field1" etc.
+                var columnName = member?.Name ?? GetNewExpressionParameterName(newExpr, i) ?? $"field{i}";
                 var memberType = member switch
                 {
                     PropertyInfo pi => pi.PropertyType,
@@ -624,16 +628,19 @@ internal sealed class AgeCypherEngine
         Dictionary<string, object?> parameters,
         string columnDefinitions)
     {
-        // Build the SQL query with explicit column definitions
-        // Escape the Cypher query for use in dollar-quoted string
-        var escapedCypher = cypher.Replace("\\", "\\\\");
+        // Build the SQL query with explicit column definitions.
+        // In Konnektr 1.x, CypherHelpers.EscapeCypher() was called inside CreateCypherCommand
+        // to escape backslashes. In Konnektr 2.x, EscapeCypher was removed, so the visitor
+        // code now generates Cypher with properly escaped backslashes (e.g., \\m for regex
+        // word boundary anchors). Since $$...$$ dollar-quoted strings preserve backslashes
+        // literally, no additional escaping is needed here.
         
         // Serialize parameters to JSON
         var parametersJson = System.Text.Json.JsonSerializer.Serialize(parameters);
         var agtypeParams = new Agtype(parametersJson);
         
         // Build the full SQL query
-        var sql = $"SELECT * FROM ag_catalog.cypher('{graphName}', $$ {escapedCypher} $$, $1) as {columnDefinitions};";
+        var sql = $"SELECT * FROM ag_catalog.cypher('{graphName}', $$ {cypher} $$, $1) as {columnDefinitions};";
         
         var command = new NpgsqlCommand(sql, connection);
         command.Parameters.Add(new NpgsqlParameter { Value = agtypeParams, DataTypeName = "ag_catalog.agtype" });
@@ -651,4 +658,19 @@ internal sealed class AgeCypherEngine
         return "(src0 agtype, r0 agtype, tgt0 agtype)";
     }
 
+    /// <summary>
+    /// When a NewExpression's Members array is null (happens for named record types like
+    /// <c>new PathSegmentProjection(since, endNode)</c>), extracts the constructor parameter
+    /// name at the given index so column aliases match the record's parameter names.
+    /// </summary>
+    private static string? GetNewExpressionParameterName(NewExpression newExpr, int parameterIndex)
+    {
+        var constructor = newExpr.Type.GetConstructors().FirstOrDefault();
+        if (constructor == null)
+            return null;
+        var parameters = constructor.GetParameters();
+        if (parameterIndex < 0 || parameterIndex >= parameters.Length)
+            return null;
+        return parameters[parameterIndex].Name;
+    }
 }

@@ -514,7 +514,7 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
                 if (stringProperties.Count > 0)
                 {
                     var conditions = stringProperties
-                        .Select(prop => $"{alias}.{prop} =~ '(?i)\\m{searchQuery}\\M'")
+                        .Select(prop => $"{alias}.{prop} =~ '(?i)\\\\m{searchQuery}\\\\M'")
                         .ToList();
                     var whereCondition = string.Join(" OR ", conditions);
                     EmitWhereFragment(whereCondition, alias, ImmutableArray.Create(alias));
@@ -522,7 +522,7 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
                 }
                 else
                 {
-                    EmitWhereFragment($"toString({alias}) =~ '(?i)\\m{searchQuery}\\M'", alias, ImmutableArray.Create(alias));
+                    EmitWhereFragment($"toString({alias}) =~ '(?i)\\\\m{searchQuery}\\\\M'", alias, ImmutableArray.Create(alias));
                 }
             }
         }
@@ -716,10 +716,15 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         if (stringProperties.Count > 0)
         {
             // Use regex word-boundary matching via the =~ operator with case-insensitive flag.
-            // \\m = begin word, \\M = end word (PostgreSQL regex syntax for word boundaries).
+            // \\m = begin word, \\M = end word (PostgreSQL/Cypher regex syntax for word boundaries).
             // This ensures "John" matches the word "John" but not the substring in "Johnson".
+            //
+            // In Konnektr 1.x, CypherHelpers.EscapeCypher() would double any backslash before
+            // embedding in $$...$$. In Konnektr 2.x, EscapeCypher was removed, so we must
+            // pre-escape backslashes ourselves: \\m in the Cypher string literal becomes
+            // \m after Cypher string parsing, which is what the regex engine needs.
             var conditions = stringProperties
-                .Select(prop => $"{alias}.{prop} =~ '(?i)\\m{searchQuery}\\M'")
+                .Select(prop => $"{alias}.{prop} =~ '(?i)\\\\m{searchQuery}\\\\M'")
                 .ToList();
 
             var whereCondition = string.Join(" OR ", conditions);
@@ -729,7 +734,7 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         else
         {
             // Fallback: match on the whole entity as string with word boundaries
-            EmitWhereFragment($"toString({alias}) =~ '(?i)\\m{searchQuery}\\M'", alias, ImmutableArray.Create(alias));
+            EmitWhereFragment($"toString({alias}) =~ '(?i)\\\\m{searchQuery}\\\\M'", alias, ImmutableArray.Create(alias));
             _logger.LogDebug("Emitted fallback full text search WHERE for alias {Alias}", alias);
         }
     }
