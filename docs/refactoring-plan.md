@@ -1,53 +1,121 @@
 ---
 title: "Refactoring Plan"
 description: "Comprehensive code analysis and refactoring plan for the AGE Graph Model provider in the new worktree"
-ms.date: 2026-06-01
+ms.date: 2026-06-02
 ---
 
 # Refactoring Plan: Graph Model AGE Provider
 
 ## Executive Summary
 
-This document describes the refactoring opportunities identified in the `new_add_postgres_age_support` branch of the `graphmodel-dotnet` repository. The branch contains a migration of Apache AGE support from an earlier draft (`add_postgres_age_support`) onto the current `main` branch history, along with package updates and additional feature work.
+This document describes the refactoring opportunities identified in the `new_add_postgres_age_support` branch.
 
-**Progress (as of 2026-06-01)**: 11 refactoring phases completed, 11 commits, 0 test regressions.
+**Phase 1 (completed)**: 11 commits, eliminated major duplication, reduced largest files by 18-46%.
 
-**Scope**: 90+ source files changed across 6 projects, with the AGE provider project (`src/Graph.Model.Age/`) containing the bulk of new code.
-
-**Key Findings**: Several classes exceeded 500 lines and have been reduced through extraction. Duplication between the expression visitor and projection fragment visitor has been eliminated via shared helpers. Some remaining areas could benefit from further work (P4).
+**Phase 2 (this iteration)**: Target is getting ALL files below 300 lines. Current analysis shows 9 files above 300 lines that still have clear extraction candidates. The strategy uses **handler grouping** — extracting co-located private methods by logical responsibility, not by one-class-per-method extremes.
 
 ## 1. Current Code Health Overview
 
 ### 1.1 File Size Distribution (AGE Provider)
 
-| File | Lines | Before | Δ | Risk |
-|------|-------|--------|----|------|
-| `AgeExpressionToCypherVisitor.cs` | 894 | 1,504 | **-40%** | 🟢 Managed |
-| `AgeCypherQueryVisitor.cs` | 1,307 | 1,344 | -3% | 🟡 High |
-| `ProjectionFragmentVisitor.cs` | 410 | 760 | **-46%** | 🟢 Managed |
-| `AgeCypherEngine.cs` | 452 | 617 | **-27%** | 🟢 Managed |
-| `AgeResultProcessor.cs` | 372 | 561 | **-34%** | 🟢 Managed |
-| `AgeGraph.cs` | 421 | 512 | **-18%** | 🟢 Managed |
-| `AgeEntityAttributeValidator.cs` | 540 | 543 | — | 🟡 High |
-| `AgeEntityMapper.cs` | 548 | 548 | — | 🟡 High |
-| Remaining 27 files | <200 each | 🟢 Low | Generally well-sized |
+| File | Lines | Phase 1 Δ | This Iteration Target |
+|------|-------|-----------|----------------------|
+| `AgeCypherQueryVisitor.cs` | 1,307 | -3% | **~500** |
+| `AgeExpressionToCypherVisitor.cs` | 894 | -40% | **~500** |
+| `AgeEntityMapper.cs` | 548 | — | **~250** |
+| `AgeEntityAttributeValidator.cs` | 540 | — | **~200** |
+| `AgeCypherEngine.cs` | 452 | -27% | **~250** |
+| `AgeGraph.cs` | 421 | -18% | **~280** |
+| `ProjectionFragmentVisitor.cs` | 410 | -46% | **~200** |
+| `CollectExpressionTranslator.cs` | 382 | — | **~200** |
+| `AgeResultProcessor.cs` | 372 | -34% | **~250** |
+| Remaining 30+ files | <215 each | 🟢 | ✅ Already done |
 
-### 1.2 Project Comparison (LOC)
+**Phase 2 Target**: Reduce ~5,300 lines of above-threshold files to ~2,600 lines.
 
-| Project | Estimated LOC | Notes |
-|---------|---------------|-------|
-| `Graph.Model.Age` | ~8,000+ | New provider, largest codebase |
-| `Graph.Model.Neo4j` | ~2,000 | Established provider |
-| `Graph.Model.Cypher` | ~800 | Shared abstractions (extended) |
-| `Graph.Model.Serialization` | ~1,500 | Shared (extended for AGE) |
+## 2. Detailed Extraction Analysis
 
-**Observation**: The AGE provider is roughly 4x larger than the Neo4j provider. Some of this is inherent (AGE needs more workarounds), but some is accidental complexity.
+### 2.1 AgeCypherQueryVisitor (1,307 lines → ~500)
 
-## 2. Critical Refactorings
+**Structure**: ExpressionVisitor subclass. Already uses 4 sub-visitors (traversal, filtering, projection, aggregation). ~20 inline methods remain.
 
-### 2.1 Split `AgeExpressionToCypherVisitor` (1,504 lines)
+**Handlers to extract**:
 
-**Problem**: This single class handles ALL expression type translations: binary, member, constant, method calls (string, math, DateTime), unary, conditional, new expressions, collection operations, closure captures, and path segment resolution. It violates the Single Responsibility Principle.
+| Handler | Methods | Lines | New File |
+|---------|---------|-------|----------|
+| `PathSegmentHandler` | `HandlePathSegments`, `HandlePathSegmentsIncoming`, `HandlePathSegmentsOutgoing`, `HandleTraverse` + 3 helpers | ~200 | `PathSegmentHandler.cs` |
+| `AggregationHandler` | `HandleCount`, `HandleAny`, `HandleAll`, `HandleSum`, `HandleAverage`, `HandleMin`, `HandleMax` | ~140 | `AggregationHandler.cs` |
+| `MaterializationHandler` | `HandleFirst`, `HandleLast`, `HandleSingle`, `HandleToList` | ~100 | `MaterializationHandler.cs` |
+| `PagingHandler` | `HandleOrderBy`, `HandleThenBy`, `HandleTake`, `HandleSkip`, `HandleDistinct` | ~80 | `PagingHandler.cs` |
+| Remaining in visitor | Constructor, `VisitMethodCall` dispatch, `HandleWhere`, `HandleSelect`, `HandleGroupBy`, `HandleJoin`, `HandleSearch`, helpers | ~500 | Core coordinator |
+
+Each handler takes the same constructor pattern (`CypherQueryContext`, `ILogger`) and returns `Expression`. The coordinator's `VisitMethodCall` routes to handlers.
+
+### 2.2 AgeExpressionToCypherVisitor (894 lines → ~500)
+
+Already has 4 extracted sub-handlers. Remaining inline methods:
+
+| Handler | Methods | Lines | New File |
+|---------|---------|-------|----------|
+| `MemberExpressionHandler` | `VisitMember` — the huge 260-line method + `TryEvaluateStaticMember` | ~270 | `MemberExpressionHandler.cs` |
+| `ClosureCaptureHandler` | `TryHandleClosureCountOnRelationship`, `HandleClosureCountOnRelationship`, `DetectRelationshipDirection`, `IsMemberAccess`, `IsCountByNodeIdPredicate` + enum | ~170 | `ClosureCaptureHandler.cs` |
+| Remaining in visitor | Constructor, `VisitBinary`, `VisitConstant`, `VisitMethodCall`, `VisitUnary`, `VisitConditional`, `VisitNew`, `HandleToListOnNestedSelect`, collect delegates, `AddParameter`, `VisitAndReturnCypher`, `IsPathSegmentType` | ~500 | Core coordinator |
+
+### 2.3 AgeEntityMapper (548 lines → ~250)
+
+| Component | Methods | Lines | New File |
+|-----------|---------|-------|----------|
+| `EntityTypeResolver` | Type resolution logic (extracted from MapVertex + MapEdge), `Labels.GetMostDerivedType` wrapper | ~80 | `EntityTypeResolver.cs` |
+| `LabelsExtractor` | `ExtractLabels(Vertex)` + `ExtractLabels(Edge)` — currently duplicated code | ~80 | `LabelsExtractor.cs` |
+| `EntityValueConverter` | `ConvertValue`, `NormalizeValue`, `ConvertJsonElementToValue`, `ConvertJsonElementToDictionary`, `CreateSimpleProperty` | ~120 | `EntityValueConverter.cs` |
+| `EntityInfoBuilder` | `CreateEntityInfoFromDictionary`, `IsComplexCollectionType`, `DetermineElementType`, `ParsePointFromJson` | ~80 | `EntityInfoBuilder.cs` |
+| Remaining in mapper | `MapVertex`, `MapEdge`, `MapAgePropertyNameToCSharp` | ~250 | Core mapper |
+
+### 2.4 AgeEntityAttributeValidator (540 lines → ~200)
+
+| Component | Methods | Lines | New File |
+|-----------|---------|-------|----------|
+| `UniqueConstraintValidator` | `ValidateUniqueConstraintsAsync`, `ValidateCompositeKeyAsync`, `ValidateUniquePropertiesAsync` | ~130 | `UniqueConstraintValidator.cs` |
+| `PropertyRuleValidator` | `ValidatePropertyRules`, `ValidateDynamicPropertyRules`, `ValidatePropertyValue`, `EnsureSchemaInitializedAsync` | ~150 | `PropertyRuleValidator.cs` |
+| `ConflictLogger` | `LogConflictDetailsAsync`, `FormatAgtype`, `FormatValue` | ~80 | `ConflictLogger.cs` |
+| `CypherQueryHelper` | `HasConflictAsync`, `GetQualifiedProperty`, `GetQualifiedIdProperty`, `EscapeLabel`, `EscapePropertyName` | ~60 | `CypherQueryHelper.cs` |
+| Remaining in validator | `ValidateNodeAsync`, `ValidateRelationshipAsync` (facade methods) | ~200 | Facade |
+
+### 2.5 AgeCypherEngine (452 lines → ~250)
+
+| Component | Methods | Lines | New File |
+|-----------|---------|-------|----------|
+| `AggregationDetector` | `DetectAggregationType` | ~60 | `AggregationDetector.cs` |
+| `QueryExpressionAnalyzer` | `DetectProjection`, `ExtractElementType`, `ExtractElementTypeFromExpression`, `ExtractProjectedResultType` | ~60 | `QueryExpressionAnalyzer.cs` |
+| `ToDictionaryExecutor` | `ExecuteToDictionaryAsync`, `ExecuteAsListAsync` | ~100 | `ToDictionaryExecutor.cs` |
+| Remaining in engine | Constructor, `ExecuteAsync`, `BuildCypherQuery`, `ExecuteQueryWithSharedArchitecture`, `ExecuteRawQueryAsync` | ~250 | Core engine |
+
+### 2.6 AgeGraph (421 lines → ~280)
+
+| Component | Methods | Lines | New File |
+|-----------|---------|-------|----------|
+| `GraphSearchHelper` | `SearchAsync`, `SearchNodesAsync` (3 overloads), `SearchRelationshipsAsync` (3 overloads) | ~150 | `GraphSearchHelper.cs` |
+| Remaining in graph | `GetTransactionAsync`, `NodesAsync`, `RelationshipsAsync`, CRUD delegates, `DisposeAsync` | ~280 | Core `AgeGraph` |
+
+### 2.7 ProjectionFragmentVisitor (410 lines → ~200)
+
+| Component | Methods | Lines | New File |
+|-----------|---------|-------|----------|
+| `NestedCollectHandler` | `TryHandleNestedCollect`, `TryResolveWithCollectFallback`, `TryResolveExpression` | ~170 | `NestedCollectHandler.cs` |
+| Remaining in visitor | `HandleSelect`, `HandleGroupBy`, `ResolveMemberExpression`, helpers | ~240 | Core visitor |
+
+### 2.8 CollectExpressionTranslator (382 lines → ~200)
+
+| Component | Methods | Lines | New File |
+|-----------|---------|-------|----------|
+| Unchanged (tool class) | All methods are cohesive — could extract `BinaryExpressionHelper` and `MemberExpressionHelper` | ~180 of overhead removed via helpers | Internal refactoring only |
+
+### 2.9 AgeResultProcessor (372 lines → ~250)
+
+| Component | Methods | Lines | New File |
+|-----------|---------|-------|----------|
+| `EntityResultReader` | The `ProcessAsync` loop body (vertex/edge/scalar dispatch) | ~100 | `EntityResultReader.cs` |
+| Remaining | Constructor, `ReadMultiColumnRowAsync` delegate | ~250 | Core processor |
 
 **Proposed Architecture**:
 
@@ -123,83 +191,68 @@ internal static class ExpressionTranslationHelper
 }
 ```
 
-## 3. High-Value Refactorings
+## 3. Refactoring Priority Matrix (Phase 2)
 
-### 3.1 Split `AgeCypherEngine` (617 lines)
+| Refactoring | Effort | Impact | Risk | Lines Removed | Priority |
+|-------------|--------|--------|------|---------------|----------|
+| 2.1 Split `AgeCypherQueryVisitor` (4 handlers) | High | High | Medium | ~800 | **P1** |
+| 2.4 Split `AgeEntityAttributeValidator` (4 handlers) | Medium | High | Medium | ~340 | **P1** |
+| 2.3 Split `AgeEntityMapper` (4 handlers) | Medium | High | Low | ~300 | **P1** |
+| 2.2 Split `AgeExpressionToCypherVisitor` (2 handlers) | Medium | Medium | Medium | ~400 | **P2** |
+| 2.5 Split `AgeCypherEngine` (2 handlers) | Low | Medium | Low | ~200 | **P2** |
+| 2.7 Split `ProjectionFragmentVisitor` (1 handler) | Low | Low | Low | ~170 | **P3** |
+| 2.6 Split `AgeGraph` (1 handler) | Low | Low | Low | ~140 | **P3** |
+| 2.9 Split `AgeResultProcessor` (1 handler) | Medium | Low | Medium | ~120 | **P3** |
+| 2.8 Split `CollectExpressionTranslator` | Medium | Low | Medium | ~180 | **P4** |
 
-**Problem**: The query execution engine handles: aggregation detection, Cypher query building, command creation, result materialization, scalar materialization, ToDictionary support, and column definition building.
+### Priority Definitions
 
-**Proposed Split**:
+- **P1**: Files >500 lines or high-maintenance burden. Immediate attention.
+- **P2**: Large files (400-500 lines). Schedule after P1.
+- **P3**: Medium files (350-450 lines). Schedule when in the area.
+- **P4**: Cohesive file, low ROI. Only if time permits.
 
-```
-AgeCypherEngine (coordinator, ~200 lines)
-├── QueryBuilding — BuildCypherQuery, DetectProjection
-├── QueryExecution — ExecuteRawQueryAsync, CreateCypherCommandWithColumns
-├── ScalarMaterializer — MaterializeScalarResultAsync (static)
-├── AggregationHandler — DetectAggregationType, HandleAggregation
-├── ToDictionaryHandler — ExecuteToDictionaryAsync, ExecuteAsListAsync
-└── ColumnDefinitionBuilder — BuildColumnDefinitions, BuildPathSegmentColumnDefinitions
-```
+## 4. Implementation Strategy — Phase 2
 
-**Alternative**: Extract `ScalarMaterializer` and `ColumnDefinitionBuilder` as separate classes immediately. The engine is the most-tested path and should remain stable.
+### Phase 2-A: Entity Layer Extraction (P1)
+1. Extract `EntityTypeResolver` + `LabelsExtractor` from `AgeEntityMapper`
+2. Extract `EntityValueConverter` + `EntityInfoBuilder` from `AgeEntityMapper`
+3. Extract `UniqueConstraintValidator` + `ConflictLogger` from `AgeEntityAttributeValidator`
+4. Extract `PropertyRuleValidator` + `CypherQueryHelper` from `AgeEntityAttributeValidator`
 
-### 3.2 Split `AgeResultProcessor` (561 lines)
+### Phase 2-B: Query Visitor Extraction (P1)
+1. Extract `PathSegmentHandler` from `AgeCypherQueryVisitor`
+2. Extract `AggregationHandler` + `MaterializationHandler` + `PagingHandler` from `AgeCypherQueryVisitor`
+3. Extract `ClosureCaptureHandler` from `AgeExpressionToCypherVisitor`
+4. Extract `MemberExpressionHandler` from `AgeExpressionToCypherVisitor`
 
-**Problem**: The result processor has become a monolith for converting AGE query results to `EntityInfo` objects. `ReadMultiColumnRowAsync` alone is ~250 lines with deeply nested conditionals.
+### Phase 2-C: Engine Extraction (P2)
+1. Extract `AggregationDetector` + `QueryExpressionAnalyzer` from `AgeCypherEngine`
+2. Extract `ToDictionaryExecutor` from `AgeCypherEngine`
+3. Extract `GraphSearchHelper` from `AgeGraph`
+4. Extract `NestedCollectHandler` from `ProjectionFragmentVisitor`
 
-**Proposed Split**:
+### Phase 2-D: Polish (P3)
+1. Extract `EntityResultReader` from `AgeResultProcessor`
+2. Internal refactoring of `CollectExpressionTranslator`
 
-```
-AgeResultProcessor (coordinator, ~100 lines)
-├── MultiColumnRowReader        (~150 lines)
-├── PathSegmentReconstructor    (~80 lines)
-├── AgtypeListConverter         (~80 lines)
-├── AgtypeMapConverter          (~60 lines)
-├── AgtypeScalarConverter       (~60 lines)
-└── JsonFallbackDeserializer    (~40 lines)
-```
+## 5. Architectural Observations
 
-### 3.3 Split `AgeEntityAttributeValidator` (543 lines)
+### 5.1 Strengths (Phase 1 Outcomes)
+- **Handler pattern** successfully applied to 4 expression handler types
+- **Shared helpers** eliminated cross-visitor duplication
+- **Generic error handling** via `GraphOperationHelper` in 14 methods
+- **All 347 tests pass** with 0 regressions over 11 commits
 
-**Problem**: Static class mixing node/relationship validation, dynamic property rules, unique constraints, composite keys, and conflict logging. All methods are `static`, making it hard to unit test.
+### 5.2 Remaining Weaknesses
+- **Handler groups not extracted**: `AgeCypherQueryVisitor` still has ~20 inline methods that can be grouped by concern
+- **Mapper/value conversion inline**: `AgeEntityMapper` has 2 large public methods mixing type resolution, label extraction, and value conversion
+- **Static validator monolith**: `AgeEntityAttributeValidator` remains entirely static with 17 methods
+- **Engine mixed concerns**: `AgeCypherEngine` still mixes aggregation detection, query analysis, and ToDictionary execution
+- **Search methods in Graph**: `AgeGraph` has 7 search-related methods that could form their own class
 
-**Proposed Split**:
-
-```
-AgeEntityAttributeValidator (facade, ~50 lines)
-├── NodeValidationStrategy         (~80 lines)
-├── RelationshipValidationStrategy  (~80 lines)
-├── DynamicPropertyValidator       (~120 lines)
-├── StaticPropertyValidator        (~80 lines)
-├── UniqueConstraintValidator      (~100 lines)
-├── CompositeKeyValidator          (~80 lines)
-└── ConflictLogger                 (~60 lines)
-```
-
-### 3.4 Extract Error Handling from `AgeGraph` (512 lines)
-
-**Problem**: The `AgeGraph` class implements the `IGraph` interface with extensive try-catch wrapping that follows the same pattern in every method. The error handling boilerplate is ~30% of the file.
-
-**Proposed Solution**:
-Extract the repetitive pattern into a reusable helper that calls a delegate within a try-catch:
-
-```csharp
-internal static class GraphOperationHelper
-{
-    public static async Task<T> ExecuteAsync<T>(
-        ILogger logger,
-        string operationName,
-        Func<Task<T>> operation)
-    {
-        try
-        {
-            return await operation().ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is not GraphException)
-        {
-            logger.LogError(ex, "Failed to {Operation}", operationName);
-            throw new GraphException($"Failed to {operationName}", ex);
-        }
+### 5.3 Test Coverage Gaps
+Same as previous analysis — no isolated unit tests for individual components like entity mapper, validators, or result processor.
     }
 }
 ```
@@ -224,59 +277,7 @@ Both `AgeCypherQueryVisitor` and the Neo4j `CypherQueryVisitor` follow the same 
 
 The fragment classes (`CypherQueryFragments`, `QueryFragments`, `FragmentFormatting`, `FragmentSequenceInsights`) are shared between providers. The AGE-specific `AgeQueryFragments` should be reviewed for further extraction opportunities.
 
-## 5. Refactoring Priority Matrix
-
-| Refactoring | Effort | Impact | Risk | Priority |
-|-------------|--------|--------|------|----------|
-| 2.1 Split `AgeExpressionToCypherVisitor` | High | High | Medium | **P1** ✅ Done |
-| 2.3 De-duplicate expression translation | Medium | High | Medium | **P1** ✅ Done |
-| 2.2 Split `ProjectionFragmentVisitor` | Medium | High | Medium | **P1** ✅ Done |
-| 3.4 Extract error handling from `AgeGraph` | Low | Medium | Low | **P2** ✅ Done |
-| 3.2 Split `AgeResultProcessor` | High | Medium | High | **P2** ✅ AgeValueConverters done |
-| 3.1 Split `AgeCypherEngine` | Medium | Medium | High | **P2** ✅ Scalar + ColumnDef done |
-| 3.3 Split `AgeEntityAttributeValidator` | Medium | Medium | Medium | **P3** ❌ Tightly coupled |
-| 4.1 Consolidate queryable types | Low | Low | Low | **P3** |
-| 4.2 Normalize Cypher visitor | High | Low | High | **P4** |
-| 4.3 Extract config builder | Low | Low | Low | **P4** |
-
-### Priority Definitions
-
-- **P1**: Addresses code duplication and maintainability bottlenecks. Should be done before significant new feature work.
-- **P2**: Improves testability and reduces class size. Schedule after P1.
-- **P3**: Cleanup with moderate benefit. Schedule when in the area.
-- **P4**: Nice-to-have. No immediate need.
-
-## 6. Architectural Observations
-
-### 6.1 Strengths
-
-- **Modular fragment visitor pattern**: The `FragmentEmittingVisitorBase` and its sub-visitors (`TraversalFragmentVisitor`, `FilteringFragmentVisitor`, `ProjectionFragmentVisitor`, `AggregationFragmentVisitor`) show good separation of concerns.
-- **Interface-based Cypher abstractions**: The `ICypherExpressionProcessor`, `ICypherQueryBuilderContext`, `ICypherCollectionProvider` interfaces enable provider-specific implementations.
-- **Generic materializer**: `ResultMaterializer<TValueConverter>` correctly uses generics to support provider-specific value conversion.
-- **Comprehensive test coverage**: The test suite has dedicated test files for each major feature area.
-
-### 6.2 Weaknesses
-
-- **Expression translation duplication**: Two separate systems (`AgeExpressionToCypherVisitor` and `ProjectionFragmentVisitor.TranslateInnerExpression`) both translate LINQ expressions to Cypher with different approaches.
-- **Mixed concerns in execution**: `AgeCypherEngine` couples query building, command execution, and result materialization.
-- **Static validators**: `AgeEntityAttributeValidator` is entirely static, making it hard to mock in tests and hard to extend with new validation rules.
-- **Error handling boilerplate**: Repetitive try-catch patterns across the codebase.
-
-### 6.3 Test Coverage Gaps
-
-The analysis found these files lack corresponding unit tests for individual components (integration tests exercise the full pipeline but don't test units in isolation):
-
-| Component | Unit Tests | Integration Tests |
-|-----------|-----------|-------------------|
-| `AgeExpressionToCypherVisitor` | ✅ FragmentRendererTests | ✅ Implicit via QueryTests |
-| `AgeEntityMapper` | ❌ Missing | ✅ Implicit |
-| `AgeEntityAttributeValidator` | ❌ Missing | ✅ AttributeValidationTests |
-| `AgeResultProcessor` | ❌ Missing | ✅ Implicit via QueryTests |
-| `AgeNodeManager` | ❌ Missing | ✅ Implicit via CRUD tests |
-| `AgeRelationshipManager` | ❌ Missing | ✅ Implicit via CRUD tests |
-| `AgeSerializationBridge` | ❌ Missing | ✅ Implicit |
-
-## 7. Refactoring Workflow Instructions
+## 6. Refactoring Workflow Instructions
 
 This section defines the strict protocol to follow for every refactoring step. The goal is **zero regression**: every change must preserve the exact same behavior while improving structure.
 
