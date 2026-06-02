@@ -42,6 +42,7 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
     private readonly AggregationFragmentVisitor _aggregationVisitor;
     private readonly JoinHandler _joinHandler;
     private readonly SearchHandler _searchHandler;
+    private readonly MaterializationHandler _materializationHandler;
     
     /// <summary>
     /// Defines the semantic position of a WHERE clause relative to path traversal operations.
@@ -68,6 +69,8 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         _aggregationVisitor = new AggregationFragmentVisitor(_context, _logger);
         _joinHandler = new JoinHandler(_context, _logger, Visit, ExtractLambda);
         _searchHandler = new SearchHandler(_context, _logger, Visit, SetupInitialMatch, EmitWhereFragment);
+        _materializationHandler = new MaterializationHandler(
+            _context, _logger, Visit, GetContextualAlias, EmitWhereFragment, ExtractLambda);
     }
 
     /// <summary>
@@ -300,16 +303,16 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
             "Max" or "MaxAsync" or "MaxAsyncMarker" => HandleMax(node),
 
             // Element access methods
-            "First" or "FirstAsync" or "FirstAsyncMarker" => HandleFirst(node),
-            "FirstOrDefault" or "FirstOrDefaultAsync" or "FirstOrDefaultAsyncMarker" => HandleFirst(node),
-            "Last" or "LastAsync" or "LastAsyncMarker" => HandleLast(node),
-            "LastOrDefault" or "LastOrDefaultAsync" or "LastOrDefaultAsyncMarker" => HandleLast(node),
-            "Single" or "SingleAsync" or "SingleAsyncMarker" => HandleSingle(node),
-            "SingleOrDefault" or "SingleOrDefaultAsync" or "SingleOrDefaultAsyncMarker" => HandleSingle(node),
+            "First" or "FirstAsync" or "FirstAsyncMarker" => _materializationHandler.HandleFirst(node),
+            "FirstOrDefault" or "FirstOrDefaultAsync" or "FirstOrDefaultAsyncMarker" => _materializationHandler.HandleFirst(node),
+            "Last" or "LastAsync" or "LastAsyncMarker" => _materializationHandler.HandleLast(node),
+            "LastOrDefault" or "LastOrDefaultAsync" or "LastOrDefaultAsyncMarker" => _materializationHandler.HandleLast(node),
+            "Single" or "SingleAsync" or "SingleAsyncMarker" => _materializationHandler.HandleSingle(node),
+            "SingleOrDefault" or "SingleOrDefaultAsync" or "SingleOrDefaultAsyncMarker" => _materializationHandler.HandleSingle(node),
 
             // Materialization methods
-            "ToList" or "ToListAsync" or "ToListAsyncMarker" => HandleToList(node),
-            "ToArray" or "ToArrayAsync" or "ToArrayAsyncMarker" => HandleToList(node),
+            "ToList" or "ToListAsync" or "ToListAsyncMarker" => _materializationHandler.HandleToList(node),
+            "ToArray" or "ToArrayAsync" or "ToArrayAsyncMarker" => _materializationHandler.HandleToList(node),
 
             // If this is not a LINQ method, continue traversing
             _ => base.VisitMethodCall(node)
@@ -489,85 +492,7 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         return node;
     }
 
-    private Expression HandleFirst(MethodCallExpression node)
-    {
-        // Visit source FIRST (proper visitor pattern: children before parent)
-        Visit(node.Arguments[0]);
-        
-    // Emit LimitFragment for LIMIT 1 directly (don't delegate to HandleTake - First doesn't have Take's signature)
-        var limitFragment = new LimitFragment(1, _context.Scope.CurrentAlias);
-    _context.AddFragment(limitFragment);
-        _logger.LogDebug("Emitted LimitFragment for First/FirstOrDefault with limit 1");
-        
-        // Handle optional predicate: First(p => p.Age > 18)
-        if (node.Arguments.Count == 2)
-        {
-            var lambda = ExtractLambda(node.Arguments[1]);
-            if (lambda != null)
-            {
-                var expressionVisitor = CreateExpressionVisitor();
-                var whereCondition = expressionVisitor.VisitAndReturnCypher(lambda.Body);
-                EmitWhereFragment(whereCondition);
-            }
-        }
-        
-        return node;
-    }
 
-    private Expression HandleLast(MethodCallExpression node)
-    {
-        // Visit source FIRST (proper visitor pattern: children before parent)
-        Visit(node.Arguments[0]);
-        
-        // Emit ReverseOrderFragment to reverse ORDER BY
-        var reverseFragment = new ReverseOrderFragment();
-    _context.AddFragment(reverseFragment);
-        _logger.LogDebug("Emitted ReverseOrderFragment for Last()");
-        
-    // Emit LimitFragment for LIMIT 1
-        var limitFragment = new LimitFragment(1, _context.Scope.CurrentAlias);
-    _context.AddFragment(limitFragment);
-        _logger.LogDebug("Emitted LimitFragment for Last()");
-        
-        // Handle optional predicate: Last(p => p.Age > 18)
-        if (node.Arguments.Count == 2)
-        {
-            var lambda = ExtractLambda(node.Arguments[1]);
-            if (lambda != null)
-            {
-                var expressionVisitor = CreateExpressionVisitor();
-                var whereCondition = expressionVisitor.VisitAndReturnCypher(lambda.Body);
-                EmitWhereFragment(whereCondition);
-            }
-        }
-        
-        return node;
-    }
-
-    private Expression HandleSingle(MethodCallExpression node)
-    {
-        // Visit source FIRST (proper visitor pattern: children before parent)
-        Visit(node.Arguments[0]);
-        
-    // Single needs LIMIT 2 to detect if there's more than one
-        var limitFragment = new LimitFragment(2, _context.Scope.CurrentAlias);
-    _context.AddFragment(limitFragment);
-        _logger.LogDebug("Emitted LimitFragment for Single()");
-        
-        // Handle optional predicate: Single(p => p.Age > 18)
-        if (node.Arguments.Count == 2)
-        {
-            var lambda = ExtractLambda(node.Arguments[1]);
-            if (lambda != null)
-            {
-                var expressionVisitor = CreateExpressionVisitor();
-                var whereCondition = expressionVisitor.VisitAndReturnCypher(lambda.Body);
-                EmitWhereFragment(whereCondition);
-            }
-        }
-        
-        return node;
-    }
 
     private void EmitWhereFragment(string predicate, string? alias = null, ImmutableArray<string> consumedAliases = default)
     {
@@ -583,142 +508,7 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         _logger.LogDebug("Emitted WhereFragment for alias {Alias}: {Predicate}", currentAlias, predicate);
     }
 
-    private Expression HandleToList(MethodCallExpression node)
-    {
-        _logger.LogDebug("Processing ToList/ToArray method");
 
-        // Visit source FIRST (proper visitor pattern)
-        var result = Visit(node.Arguments[0]);
-
-        // Check if we need to enable complex property loading for node queries
-        var resultType = node.Type.GetGenericArguments().FirstOrDefault();
-        
-        // Check if this expression tree contains PathSegments calls
-        bool containsPathSegments = ContainsPathSegmentsCall(node);
-        var hasExplicitReturns = _context.HasExplicitReturnFragments();
-        
-        if (resultType != null && resultType.IsGenericType && 
-            resultType.GetGenericTypeDefinition().Name.Contains("IGraphPathSegment"))
-        {
-            _logger.LogDebug("Processing path segment query of type {Type}", resultType.Name);
-            
-            // For path segment queries, return the path components ONLY if no projection exists
-            if (!hasExplicitReturns)
-            {
-                // Path segments should reference the LAST hop (where traversal ends), not CurrentHop
-                // For simple queries with one traversal, this is hop 0: (src0)-[r0]->(tgt0)
-                var lastHop = Math.Max(0, _context.Scope.CurrentHop - 1);
-                var sourceAlias = _context.Scope.GetNumberedAliasForHop("src", lastHop);
-                var relAlias = _context.Scope.GetNumberedAliasForHop("r", lastHop);
-                var targetAlias = _context.Scope.GetNumberedAliasForHop("tgt", lastHop);
-                var pathSegmentReturn = $"{sourceAlias}, {relAlias}, {targetAlias}";
-                var returns = ImmutableArray.Create(sourceAlias, relAlias, targetAlias);
-                var projectionFragment = new ProjectionFragment(returns, targetAlias);
-                _context.AddFragment(projectionFragment);
-                _logger.LogDebug("Emitted default path segment ProjectionFragment for hop {Hop}: {Return}", lastHop, pathSegmentReturn);
-            }
-            else
-            {
-                _logger.LogDebug("Skipping default path segment return - projection already exists");
-            }
-        }
-        else if (resultType != null && typeof(INode).IsAssignableFrom(resultType))
-        {
-            _logger.LogDebug("Processing simple node query of type {Type}", resultType.Name);
-            
-            // For node queries, add context-aware return clause ONLY if no projection exists and not in path context
-            bool isInPathContext = _context.FragmentSequence.OfType<MatchSegmentFragment>().Any();
-            if (!containsPathSegments && !isInPathContext && !hasExplicitReturns)
-            {
-                var nodeAlias = GetContextualAlias();
-                var nodeProjection = new ProjectionFragment(ImmutableArray.Create(nodeAlias), nodeAlias);
-                _context.AddFragment(nodeProjection);
-                _logger.LogDebug("Emitted default node ProjectionFragment with alias: {Alias}", nodeAlias);
-
-                // Check if the node type has complex properties (INode properties)
-                var hasComplexProperties = resultType.GetProperties()
-                    .Any(p => typeof(INode).IsAssignableFrom(p.PropertyType));
-                
-                if (hasComplexProperties)
-                {
-                    // Enable complex property loading for nodes with INode properties
-                    var optionalPattern = $"({nodeAlias})-[prop_rel]->(prop_node)";
-                    var optionalFragment = new OptionalMatchFragment(
-                        optionalPattern,
-                        ImmutableArray.Create("prop_rel", "prop_node"),
-                        ImmutableArray.Create(nodeAlias),
-                        nodeAlias);
-                    _context.AddFragment(optionalFragment);
-                    _logger.LogDebug("Emitted OptionalMatchFragment for complex property loading");
-
-                    // Always emit ComplexPropertyLoadingFragment to track state
-                    var complexPropertyFragment = new ComplexPropertyLoadingFragment(true, nodeAlias);
-                    _context.AddFragment(complexPropertyFragment);
-                    _logger.LogDebug("Emitted ComplexPropertyLoadingFragment (enabled) for node query with complex properties");
-                }
-            }
-            else
-            {
-                _logger.LogDebug("Skipping default node return - projection already exists or path context detected");
-            }
-        }
-        else if (resultType != null && typeof(IRelationship).IsAssignableFrom(resultType))
-        {
-            _logger.LogDebug("Processing relationship query of type {Type}", resultType.Name);
-            
-            // For relationship queries, add default return ONLY if:
-            // 1. No projection exists AND 
-            // 2. This is not part of a PathSegments chain (which handles its own returns)
-            if (!hasExplicitReturns && !containsPathSegments)
-            {
-                var relAlias = _context.Scope.GetNumberedAlias("r");
-                var relationshipProjection = new ProjectionFragment(ImmutableArray.Create(relAlias), relAlias);
-                _context.AddFragment(relationshipProjection);
-                _logger.LogDebug("Emitted default relationship ProjectionFragment with alias: {Alias}", relAlias);
-            }
-            else
-            {
-                if (containsPathSegments)
-                {
-                    _logger.LogDebug("Skipping default relationship return - PathSegments chain will handle returns");
-                }
-                else
-                {
-                    _logger.LogDebug("Skipping default relationship return - projection already exists");
-                }
-            }
-        }
-
-        return result;
-    }
-
-    private bool ContainsPathSegmentsCall(Expression expression)
-    {
-        _logger.LogDebug("Scanning expression tree for PathSegments calls - Expression type: {Type}", expression.GetType().Name);
-        
-        if (expression is MethodCallExpression methodCall)
-        {
-            _logger.LogDebug("Found method call: {MethodName}", methodCall.Method.Name);
-            
-            // Check if this is a PathSegments call
-            if (methodCall.Method.Name == "PathSegments")
-            {
-                _logger.LogDebug("Found PathSegments call!");
-                return true;
-            }
-            
-            // Recursively check arguments
-            foreach (var arg in methodCall.Arguments)
-            {
-                if (ContainsPathSegmentsCall(arg))
-                {
-                    return true;
-                }
-            }
-        }
-        
-        return false;
-    }
 
     /// <summary>
     /// This is called for the root queryable (e.g., context.Nodes&lt;Person&gt;())
@@ -1031,6 +821,32 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
     #region WHERE Position Analysis
 
     /// <summary>
+    /// Checks if an expression tree contains PathSegments calls.
+    /// Used to determine if traversal operations exist in the query chain.
+    /// </summary>
+    private static bool ContainsPathSegmentsCall(Expression expression)
+    {
+        if (expression is MethodCallExpression methodCall)
+        {
+            if (methodCall.Method.Name == "PathSegments")
+            {
+                return true;
+            }
+
+            // Recursively check arguments
+            foreach (var arg in methodCall.Arguments)
+            {
+                if (ContainsPathSegmentsCall(arg))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Determines the semantic position of a WHERE clause relative to path traversal operations.
     /// This enables context-aware alias mapping for pre-traversal vs post-traversal filters.
     /// </summary>
@@ -1189,19 +1005,7 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
     /// </summary>
     public void FinalizeQuery(Type elementType)
     {
-        // Check if the element type is a path segment and if no projection has been added yet
-        if (IsPathSegmentType(elementType) && !_context.HasExplicitReturnFragments())
-        {
-            // Add the default path segment projection
-            var lastHop = Math.Max(0, _context.Scope.CurrentHop - 1);
-            var sourceAlias = _context.Scope.GetNumberedAliasForHop("src", lastHop);
-            var relAlias = _context.Scope.GetNumberedAliasForHop("r", lastHop);
-            var targetAlias = _context.Scope.GetNumberedAliasForHop("tgt", lastHop);
-            var returns = ImmutableArray.Create(sourceAlias, relAlias, targetAlias);
-            var projectionFragment = new ProjectionFragment(returns, targetAlias);
-            _context.AddFragment(projectionFragment);
-            _logger.LogDebug("Finalized path segment query with default projection for hop {Hop}", lastHop);
-        }
+        _materializationHandler.FinalizeQuery(elementType);
     }
 
     #endregion
