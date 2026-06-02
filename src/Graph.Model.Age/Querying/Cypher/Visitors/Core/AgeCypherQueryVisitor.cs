@@ -40,6 +40,7 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
     private readonly FilteringFragmentVisitor _filteringVisitor;
     private readonly ProjectionFragmentVisitor _projectionVisitor;
     private readonly AggregationFragmentVisitor _aggregationVisitor;
+    private readonly JoinHandler _joinHandler;
     
     /// <summary>
     /// Defines the semantic position of a WHERE clause relative to path traversal operations.
@@ -64,6 +65,7 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         _filteringVisitor = new FilteringFragmentVisitor(_context, _logger);
         _projectionVisitor = new ProjectionFragmentVisitor(_context, _logger);
         _aggregationVisitor = new AggregationFragmentVisitor(_context, _logger);
+        _joinHandler = new JoinHandler(_context, _logger, Visit, ExtractLambda);
     }
 
     /// <summary>
@@ -268,7 +270,7 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
             "Where" => HandleWhere(node),
             "Select" => HandleSelect(node),
             "GroupBy" => HandleGroupBy(node),
-            "Join" => HandleJoin(node),
+            "Join" => _joinHandler.HandleJoin(node),
             "OrderBy" => HandleOrderBy(node, descending: false),
             "OrderByDescending" => HandleOrderBy(node, descending: true),
             "ThenBy" => HandleThenBy(node, descending: false),
@@ -351,87 +353,7 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         return node;
     }
 
-    private Expression HandleJoin(MethodCallExpression node)
-    {
-        // Join(outer, inner, outerKeySelector, innerKeySelector, resultSelector)
-        if (node.Arguments.Count != 5)
-            throw new ArgumentException("Join method must have exactly 5 arguments");
-
-        _logger.LogDebug("Processing JOIN operation");
-
-        var outer = node.Arguments[0];           // The first sequence (e.g., relationships)
-        var inner = node.Arguments[1];           // The second sequence (e.g., nodes)
-        var outerKeySelector = ExtractLambda(node.Arguments[2]);  // e.g., k => k.EndNodeId
-        var innerKeySelector = ExtractLambda(node.Arguments[3]);  // e.g., p => p.Id
-        var resultSelector = ExtractLambda(node.Arguments[4]);    // e.g., (k, p) => p
-
-        if (outerKeySelector == null || innerKeySelector == null || resultSelector == null)
-            throw new ArgumentException("Join method requires lambda expressions for all selectors");
-
-        // For this Join implementation, we assume the MATCH pattern is already correct
-        // and we just need to handle the projection correctly.
-        // The test case: allKnows.Where(...).Join(allPeople, k => k.EndNodeId, p => p.Id, (k, p) => p)
-        // means: return the Person nodes (p) that are joined with KNOWS relationships
-        
-        // First, process the outer source (should set up the MATCH pattern)
-        Visit(outer);
-
-        // Analyze the result selector to determine what to return
-        var resultBody = resultSelector.Body;
-        if (resultBody is ParameterExpression paramExpr)
-        {
-            // Simple parameter reference: (k, p) => p
-            var parameterIndex = -1;
-            for (int i = 0; i < resultSelector.Parameters.Count; i++)
-            {
-                if (resultSelector.Parameters[i].Name == paramExpr.Name)
-                {
-                    parameterIndex = i;
-                    break;
-                }
-            }
-            
-            if (parameterIndex == 0)
-            {
-                // Returning the outer parameter (relationship) - use relationship alias
-                var relationshipAlias = _context.Scope.GetNumberedAlias("r");
-                // Update scope so downstream operators understand we're working with the relationship alias
-                _context.Scope.CurrentAlias = relationshipAlias;
-
-                // Emit a projection fragment so the fragment renderer preserves the relationship return
-                var returns = ImmutableArray.Create(relationshipAlias);
-                var projectionFragment = new ProjectionFragment(returns, relationshipAlias);
-                _context.AddFragment(projectionFragment);
-                _logger.LogDebug("JOIN: Emitted ProjectionFragment for relationship alias {Alias}", relationshipAlias);
-            }
-            else if (parameterIndex == 1)
-            {
-                // Returning the inner parameter (node) - use target node alias
-                var targetAlias = _context.Scope.GetNumberedAlias("tgt");
-                // Update scope/type information for the returned node so subsequent operators use the right alias
-                _context.Scope.CurrentAlias = targetAlias;
-
-                // Emit ProjectionFragment so the renderer keeps the returned node alias in sync
-                var returns = ImmutableArray.Create(targetAlias);
-                var projectionFragment = new ProjectionFragment(returns, targetAlias);
-                _context.AddFragment(projectionFragment);
-                _logger.LogDebug("JOIN: Emitted ProjectionFragment for node alias {Alias}", targetAlias);
-            }
-            else
-            {
-                throw new ArgumentException($"Invalid parameter reference in Join result selector: {paramExpr.Name}");
-            }
-        }
-        else
-        {
-            // Complex projection - would need more sophisticated handling
-            throw new NotSupportedException("Complex projections in Join result selector are not yet supported");
-        }
-
-        // Don't continue processing the inner sequence since we're not doing a real database join
-        // The MATCH pattern should already include both the relationships and nodes
-        return outer;
-    }
+    // HandleJoin moved to JoinHandler. Dispatch: _joinHandler.HandleJoin(node)
 
     private Expression HandleOrderBy(MethodCallExpression node, bool descending)
     {
