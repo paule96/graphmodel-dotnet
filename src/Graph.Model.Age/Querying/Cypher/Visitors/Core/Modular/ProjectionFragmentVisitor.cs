@@ -14,9 +14,12 @@ using static Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core.ExpressionTrans
 /// </summary>
 internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
 {
+    private readonly NestedCollectHandler _nestedCollectHandler;
+
     public ProjectionFragmentVisitor(CypherQueryContext context, ILogger logger)
         : base(context, logger)
     {
+        _nestedCollectHandler = new NestedCollectHandler(context, logger);
     }
 
     public Expression HandleSelect(MethodCallExpression node)
@@ -79,7 +82,7 @@ internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
                 else
                 {
                     // Check for nested .Select().ToList() on IGrouping parameters
-                    if (TryHandleNestedCollect(propertyExpr, propertyName, cypherAlias, returns))
+                    if (_nestedCollectHandler.TryHandleNestedCollect(propertyExpr, propertyName, cypherAlias, returns))
                         continue;
 
                     // Complex expression — use expression visitor with collect fallback
@@ -210,195 +213,7 @@ internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
         return $"{Context.Scope.CurrentAlias ?? "src0"}.{member.Member.Name}";
     }
 
-    /// <summary>
-    /// Detects nested .Select().ToList() chains on IGrouping parameters inside projection expressions.
-    /// Pattern: group.Select(p => new { ... }).ToList()
-    /// Emits a CollectFragment that generates collect({...}) in Cypher.
-    /// </summary>
-    private bool TryHandleNestedCollect(Expression propertyExpr, string propertyName, string cypherAlias, List<string> returns)
-    {
-        // Unwrap Convert expressions (e.g., boxing List<T> → object)
-        if (propertyExpr is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } convertExpr)
-            propertyExpr = convertExpr.Operand;
-
-        // Check for .ToList() call
-        if (propertyExpr is not MethodCallExpression toListCall ||
-            toListCall.Method.Name != "ToList" ||
-            toListCall.Arguments.Count == 0)
-            return false;
-
-        var toListSource = toListCall.Arguments[0];
-
-        // Unwrap Convert on the source too
-        if (toListSource is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } srcConvert)
-            toListSource = srcConvert.Operand;
-
-        // The source may be .Select() directly, or .Where().Select(), or .OrderBy().Select()
-        // Walk through Where/OrderBy chains to find the Select, collecting Where predicates
-        MethodCallExpression? selectCall = null;
-        var wherePredicates = new List<LambdaExpression>();
-        var current = toListSource;
-        while (current is MethodCallExpression chainMc)
-        {
-            if (chainMc.Method.Name == "Select" && chainMc.Arguments.Count >= 2)
-            {
-                selectCall = chainMc;
-                // Continue walking from Select's source to find Where/OrderBy deeper in the chain
-                current = chainMc.Arguments.Count > 0 ? chainMc.Arguments[0] : null;
-                if (current is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } sc)
-                    current = sc.Operand;
-                continue;
-            }
-
-            // Collect Where predicate lambdas for injection into the WHERE clause
-            if (chainMc.Method.Name == "Where" && chainMc.Arguments.Count >= 2)
-            {
-                var whereArg = chainMc.Arguments[1];
-                if (whereArg is UnaryExpression { NodeType: ExpressionType.Quote } wq)
-                    whereArg = wq.Operand;
-                if (whereArg is LambdaExpression whereLambda)
-                    wherePredicates.Add(whereLambda);
-            }
-
-            // Unwrap the source for the next iteration
-            current = chainMc.Arguments.Count > 0 ? chainMc.Arguments[0] : null;
-            // Also unwrap Convert if present
-            if (current is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } chainConv)
-                current = chainConv.Operand;
-        }
-
-        if (selectCall == null)
-            return false;
-
-        // Check if the chain's starting source is an IGrouping parameter
-        var chainStart = toListSource;
-        while (chainStart is MethodCallExpression chainMc)
-        {
-            chainStart = chainMc.Arguments.Count > 0 ? chainMc.Arguments[0] : chainStart;
-            if (chainStart is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } chainConv)
-                chainStart = chainConv.Operand;
-        }
-
-        var isGroupingParam = chainStart is ParameterExpression paramExpr &&
-                              paramExpr.Type.IsGenericType &&
-                              paramExpr.Type.GetGenericTypeDefinition().Name.Contains("IGrouping");
-
-        if (!isGroupingParam)
-            return false;
-
-        // Extract the inner lambda
-        var lambdaArg = selectCall.Arguments[1];
-        if (lambdaArg is UnaryExpression { NodeType: ExpressionType.Quote } quote)
-            lambdaArg = quote.Operand;
-        if (lambdaArg is not LambdaExpression innerLambda)
-            return false;
-
-        // Get current hop aliases for path segment resolution inside the collect
-        var hop = Context.Scope.LastPathSegmentHop >= 0
-            ? Context.Scope.LastPathSegmentHop
-            : (Context.Scope.CurrentHop > 0 ? Context.Scope.CurrentHop - 1 : 0);
-        var hopAliases = Context.Scope.GetHopAliases(hop);
-
-        string srcAlias = "src0", relAlias = "r0", tgtAlias = "tgt0";
-        if (hopAliases.HasValue)
-        {
-            (srcAlias, relAlias, tgtAlias) = hopAliases.Value;
-        }
-
-        // Build collect expression by walking the inner lambda body directly,
-        // avoiding the expression visitor's inside-out ConstantExpression issue
-        var innerParam = innerLambda.Parameters[0]; // e.g., "p" of type IGraphPathSegment
-        string collectExpr;
-        try
-        {
-            collectExpr = TranslateInnerSelectBody(innerLambda.Body, innerParam, srcAlias, relAlias, tgtAlias);
-        }
-        catch (Exception ex)
-        {
-            Logger.LogWarning(ex, "Failed to translate nested collect for property {Property}", propertyName);
-            return false;
-        }
-
-        // Inject collected Where predicates as additional WHERE clauses
-        // This enables patterns like: group.Where(k => k.Relationship.Since > date).Select(...).ToList()
-        var alias = Context.Scope.CurrentAlias ?? "src0";
-        foreach (var wherePred in wherePredicates)
-        {
-            try
-            {
-                var whereCypher = TranslateInnerExpression(
-                    wherePred.Body, wherePred.Parameters[0], srcAlias, relAlias, tgtAlias);
-                // ^ using Where predicate's own parameter, not the Select lambda's parameter
-                Context.AddFragment(new WhereFragment(
-                    whereCypher,
-                    System.Collections.Immutable.ImmutableArray<string>.Empty,
-                    alias));
-                Logger.LogDebug("Injected inner Where filter for collect: {Where}", whereCypher);
-            }
-            catch (Exception ex)
-            {
-                Logger.LogWarning(ex, "Failed to translate inner Where predicate for {Property}", propertyName);
-            }
-        }
-
-        // Emit a CollectFragment
-        Context.AddFragment(new CollectFragment(collectExpr, alias, cypherAlias));
-
-        // Add to the RETURN clause
-        returns.Add($"collect({collectExpr}) AS {cypherAlias}");
-
-        Logger.LogDebug("Emitted CollectFragment for {Property}: collect({Expr}) AS {Alias}",
-            propertyName, collectExpr, cypherAlias);
-        return true;
-    }
-
-    /// <summary>
-    /// Translates an inner Select lambda body to a Cypher expression suitable for collect().
-    /// Handles NewExpression (anonymous type), MemberExpression (simple property), and basic arithmetic.
-    private static string TranslateInnerSelectBody(
-        Expression body,
-        ParameterExpression innerParam,
-        string srcAlias,
-        string relAlias,
-        string tgtAlias)
-    {
-        return CollectExpressionTranslator.TranslateInnerSelectBody(body, innerParam, srcAlias, relAlias, tgtAlias);
-    }
-
-    /// <summary>
-    /// Translates a single expression within an inner Select lambda to Cypher text.
-    /// </summary>
-    private static string TranslateInnerExpression(
-        Expression expr,
-        ParameterExpression innerParam,
-        string srcAlias,
-        string relAlias,
-        string tgtAlias)
-    {
-        return CollectExpressionTranslator.TranslateInnerExpression(expr, innerParam, srcAlias, relAlias, tgtAlias);
-    }
-
-    private static (string? alias, List<string> remainingPath) WalkPathSegmentChain(
-        MemberExpression expr,
-        ParameterExpression innerParam,
-        string srcAlias,
-        string relAlias,
-        string tgtAlias)
-    {
-        return CollectExpressionTranslator.WalkPathSegmentChain(expr, innerParam, srcAlias, relAlias, tgtAlias);
-    }
-
-    private static string TranslateInnerMethodCall(
-        MethodCallExpression mc,
-        ParameterExpression innerParam,
-        string srcAlias,
-        string relAlias,
-        string tgtAlias)
-    {
-        return CollectExpressionTranslator.TranslateInnerMethodCall(mc, innerParam, srcAlias, relAlias, tgtAlias);
-    }
-
-    // MapPropertyName, TryCompileEval imported via `using static ExpressionTranslationHelper`.
+    // MapPropertyName imported via `using static ExpressionTranslationHelper`.
 
     private static string TryResolveExpression(Expression expr, AgeExpressionToCypherVisitor visitor)
     {
@@ -421,31 +236,12 @@ internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
         {
             // The expression visitor failed — try nested collect detection as fallback
             var tempReturns = new List<string>();
-            if (TryHandleNestedCollect(propertyExpr, propertyName, $"c_{propertyName}", tempReturns))
+            if (_nestedCollectHandler.TryHandleNestedCollect(propertyExpr, propertyName, $"c_{propertyName}", tempReturns))
             {
                 return tempReturns.FirstOrDefault()?.Split([' '], 2).LastOrDefault()?.Replace($" AS c_{propertyName}", "") ?? "null";
             }
             return propertyExpr.ToString() ?? "unknown";
         }
-    }
-
-    /// <summary>
-    /// Compile-time evaluates a DateTime expression and returns an ISO 8601 string for AGE Cypher.
-    /// AGE does not support Neo4j duration()/datetime() arithmetic natively.
-    /// </summary>
-    private static string TryCompileDateTime(MethodCallExpression mc)
-    {
-        try
-        {
-            var lambda = Expression.Lambda<Func<object>>(Expression.Convert(mc, typeof(object)));
-            var val = lambda.Compile()();
-            return val switch
-            {
-                DateTime dt => $"'{dt:yyyy-MM-ddTHH:mm:ss}'",
-                _ => val?.ToString() ?? "null"
-            };
-        }
-        catch { return "null"; }
     }
 
     private static string? GetNewExpressionParameterName(NewExpression newExpr, int parameterIndex)
