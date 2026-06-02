@@ -41,6 +41,7 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
     private readonly ProjectionFragmentVisitor _projectionVisitor;
     private readonly AggregationFragmentVisitor _aggregationVisitor;
     private readonly JoinHandler _joinHandler;
+    private readonly SearchHandler _searchHandler;
     
     /// <summary>
     /// Defines the semantic position of a WHERE clause relative to path traversal operations.
@@ -66,6 +67,7 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         _projectionVisitor = new ProjectionFragmentVisitor(_context, _logger);
         _aggregationVisitor = new AggregationFragmentVisitor(_context, _logger);
         _joinHandler = new JoinHandler(_context, _logger, Visit, ExtractLambda);
+        _searchHandler = new SearchHandler(_context, _logger, Visit, SetupInitialMatch, EmitWhereFragment);
     }
 
     /// <summary>
@@ -285,7 +287,7 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
             "Direction" => HandleDirection(node),
 
             // Full-text search from LINQ chain (e.g., .Where().Search("text"))
-            "Search" => HandleSearch(node),
+            "Search" => _searchHandler.HandleSearch(node),
 
             // Aggregation methods
             "Count" or "CountAsync" or "CountAsyncMarker" => HandleCount(node),
@@ -407,48 +409,6 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         // Then delegate to specialized filtering visitor for distinctness
         _filteringVisitor.HandleDistinct(node);
         
-        return node;
-    }
-
-    private Expression HandleSearch(MethodCallExpression node)
-    {
-        // Visit source FIRST to ensure CurrentAlias is set and MATCH pattern is created
-        Visit(node.Arguments[0]);
-
-        // Search(query) method has the search term as the second argument
-        if (node.Arguments.Count >= 2)
-        {
-            // Try to extract the search query string
-            string? searchQuery = null;
-            if (node.Arguments[1] is ConstantExpression constExpr)
-                searchQuery = constExpr.Value as string;
-
-            if (searchQuery != null)
-            {
-                var alias = _context.Scope.CurrentAlias ?? "src0";
-                var elementType = _context.Scope.RootType;
-                var stringProperties = elementType.GetProperties()
-                    .Where(p => p.PropertyType == typeof(string) && p.CanRead)
-                    .Where(p => IsIncludedInFullTextSearch(elementType, p.Name))
-                    .Select(p => p.Name)
-                    .ToList();
-
-                if (stringProperties.Count > 0)
-                {
-                    var conditions = stringProperties
-                        .Select(prop => $"{alias}.{prop} =~ '(?i)\\\\m{searchQuery}\\\\M'")
-                        .ToList();
-                    var whereCondition = string.Join(" OR ", conditions);
-                    EmitWhereFragment(whereCondition, alias, ImmutableArray.Create(alias));
-                    _logger.LogDebug("Emitted Search WHERE: {Condition}", whereCondition);
-                }
-                else
-                {
-                    EmitWhereFragment($"toString({alias}) =~ '(?i)\\\\m{searchQuery}\\\\M'", alias, ImmutableArray.Create(alias));
-                }
-            }
-        }
-
         return node;
     }
 
@@ -609,71 +569,6 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         return node;
     }
 
-    private void HandleAgeFullTextSearch(AgeFullTextSearchExpression searchExpr)
-    {
-        var entityType = searchExpr.EntityType;
-        var searchQuery = searchExpr.SearchQuery;
-
-        // For IEntity (all entities search), search both nodes and relationships
-        if (entityType == typeof(IEntity))
-        {
-            HandleAllEntitiesTextSearch(searchQuery);
-            return;
-        }
-
-        // Set up the initial MATCH pattern for the entity type
-        SetupInitialMatch(entityType);
-
-        // Get the alias set up by SetupInitialMatch
-        var alias = _context.Scope.CurrentAlias ?? "src0";
-
-        // Build a WHERE condition checking string properties with IncludeInFullTextSearch != false.
-        // Apache AGE supports the =~ operator for non-case-sensitive word-boundary matching.
-        var stringProperties = entityType.GetProperties()
-            .Where(p => p.PropertyType == typeof(string) && p.CanRead)
-            .Where(p => IsIncludedInFullTextSearch(entityType, p.Name))
-            .Select(p => p.Name)
-            .ToList();
-
-        if (stringProperties.Count > 0)
-        {
-            // Use regex word-boundary matching via the =~ operator with case-insensitive flag.
-            // \\m = begin word, \\M = end word (PostgreSQL/Cypher regex syntax for word boundaries).
-            // This ensures "John" matches the word "John" but not the substring in "Johnson".
-            //
-            // In Konnektr 1.x, CypherHelpers.EscapeCypher() would double any backslash before
-            // embedding in $$...$$. In Konnektr 2.x, EscapeCypher was removed, so we must
-            // pre-escape backslashes ourselves: \\m in the Cypher string literal becomes
-            // \m after Cypher string parsing, which is what the regex engine needs.
-            var conditions = stringProperties
-                .Select(prop => $"{alias}.{prop} =~ '(?i)\\\\m{searchQuery}\\\\M'")
-                .ToList();
-
-            var whereCondition = string.Join(" OR ", conditions);
-            EmitWhereFragment(whereCondition, alias, ImmutableArray.Create(alias));
-            _logger.LogDebug("Emitted full text search WHERE: {Condition}", whereCondition);
-        }
-        else
-        {
-            // Fallback: match on the whole entity as string with word boundaries
-            EmitWhereFragment($"toString({alias}) =~ '(?i)\\\\m{searchQuery}\\\\M'", alias, ImmutableArray.Create(alias));
-            _logger.LogDebug("Emitted fallback full text search WHERE for alias {Alias}", alias);
-        }
-    }
-
-    /// <summary>
-    /// Handles full-text search across all entities (both nodes and relationships).
-    /// Creates two MATCH patterns with UNION to cover both entity types.
-    /// </summary>
-    private void HandleAllEntitiesTextSearch(string searchQuery)
-    {
-        // For all-entities search, we search nodes
-        // The test uses this with IEntity but the Cypher query returns vertices
-        SetupInitialMatch(typeof(INode));
-        var alias = _context.Scope.CurrentAlias ?? "src0";
-        EmitWhereFragment($"toString({alias}) =~ '(?i).*{searchQuery}.*'", alias, ImmutableArray.Create(alias));
-    }
-
     private void EmitWhereFragment(string predicate, string? alias = null, ImmutableArray<string> consumedAliases = default)
     {
         if (string.IsNullOrWhiteSpace(predicate))
@@ -686,32 +581,6 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         var fragment = new WhereFragment(predicate, normalizedConsumed, currentAlias);
     _context.AddFragment(fragment);
         _logger.LogDebug("Emitted WhereFragment for alias {Alias}: {Predicate}", currentAlias, predicate);
-    }
-
-    /// <summary>
-    /// Checks whether a property should be included in full-text search queries.
-    /// If IncludeInFullTextSearch is explicitly set to false (in the SchemaRegistry),
-    /// the property is excluded.
-    /// </summary>
-    private bool IsIncludedInFullTextSearch(Type entityType, string propertyName)
-    {
-        var schemaRegistry = _context.SchemaRegistry;
-        if (schemaRegistry == null)
-            return true; // No schema available, include by default
-
-        var label = Labels.GetLabelFromType(entityType);
-        var schema = schemaRegistry.GetNodeSchema(label) 
-                  ?? schemaRegistry.GetRelationshipSchema(label) as EntitySchemaInfo;
-        if (schema?.Properties == null)
-            return true;
-
-        // Look up by C# property name (schema dictionary key)
-        if (schema.Properties.TryGetValue(propertyName, out var propSchema))
-        {
-            return propSchema.IncludeInFullTextSearch != false;
-        }
-
-        return true; // Property not in schema, include by default
     }
 
     private Expression HandleToList(MethodCallExpression node)
@@ -879,7 +748,7 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         if (node is AgeFullTextSearchExpression searchExpr)
         {
             _logger.LogDebug("Handling AGE full text search expression for query: {Query}", searchExpr.SearchQuery);
-            HandleAgeFullTextSearch(searchExpr);
+            _searchHandler.HandleAgeFullTextSearch(searchExpr);
             return node;
         }
 
