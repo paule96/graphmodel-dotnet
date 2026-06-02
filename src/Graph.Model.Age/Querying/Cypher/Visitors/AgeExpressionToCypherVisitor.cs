@@ -42,6 +42,7 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
     private readonly DateTimeMethodHandler _dateTimeHandler;
     private readonly CollectionExpressionHandler _collectionHandler;
     private readonly ClosureCaptureHandler _closureCaptureHandler;
+    private readonly MemberExpressionHandler _memberHandler;
 
     public AgeExpressionToCypherVisitor(
         CypherQueryContext context,
@@ -75,6 +76,17 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
             addParameter: AddParameter,
             logger: _logger);
         _closureCaptureHandler = new ClosureCaptureHandler(_logger, _sourceAlias ?? _alias ?? "src0");
+        _memberHandler = new MemberExpressionHandler(
+            _context, _logger, _alias ?? "n",
+            _sourceAlias, _relationshipAlias, _targetAlias,
+            isPathSegmentContext: _pathSegmentParameter != null,
+            tryEvaluateStatic: (MemberExpression m, bool _) =>
+            {
+                var ok = TryEvaluateStaticMember(m, out var v);
+                return (ok, v);
+            },
+            visitAndReturnCypher: VisitAndReturnCypher,
+            addParameter: AddParameter);
     }
 
     private string AddParameter(object? value)
@@ -159,266 +171,7 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
 
     protected override Expression VisitMember(MemberExpression node)
     {
-        // Special handling when we have a path segment parameter context
-        if (_pathSegmentParameter != null)
-        {
-            // Handle path segment property access (e.g., ps.EndNode.Age)
-            if (node.Expression is MemberExpression pathSegmentMember &&
-                pathSegmentMember.Expression is ParameterExpression pathParam &&
-                pathParam == _pathSegmentParameter)
-            {
-                _logger.LogDebug("Processing path segment property access: {Parameter}.{SegmentProperty}.{NodeProperty}",
-                    pathParam.Name, pathSegmentMember.Member.Name, node.Member.Name);
-
-                var segmentProperty = pathSegmentMember.Member.Name;
-                var nodeProperty = node.Member.Name;
-
-                var alias = segmentProperty switch
-                {
-                    nameof(IGraphPathSegment.StartNode) => _sourceAlias ?? "src0",
-                    nameof(IGraphPathSegment.EndNode) => _targetAlias ?? "tgt0",
-                    nameof(IGraphPathSegment.Relationship) => _relationshipAlias ?? "r0",
-                    _ => throw new NotSupportedException($"Path segment property '{segmentProperty}' is not supported")
-                };
-
-                // Map C# property names to AGE property names
-                var propertyName = MapPropertyName(nodeProperty);
-                var result = $"{alias}.{propertyName}";
-                _logger.LogDebug("Mapped path segment property {SegmentProperty}.{NodeProperty} to {Result}",
-                    segmentProperty, nodeProperty, result);
-                return Expression.Constant(result);
-            }
-        }
-
-        // Handle static DateTime properties (e.g., DateTime.Now, DateTime.Today, DateTime.UtcNow)
-        // AGE's Cypher doesn't support localdatetime()/date()/datetime(). Evaluate at compile time
-        // and pass as parameters instead.
-        if (node.Member.DeclaringType == typeof(DateTime) && node.Expression == null)
-        {
-            switch (node.Member.Name)
-            {
-                case "Now":
-                case "Today":
-                case "UtcNow":
-                case "MaxValue":
-                case "MinValue":
-                    if (TryEvaluateStaticMember(node, out var evaluated))
-                    {
-                        var paramRef = AddParameter(evaluated);
-                        return Expression.Constant(paramRef);
-                    }
-                    throw new NotSupportedException($"DateTime static property {node.Member.Name} is not supported");
-                default:
-                    if (TryEvaluateStaticMember(node, out var val))
-                    {
-                        var paramRef = AddParameter(val);
-                        return Expression.Constant(paramRef);
-                    }
-                    throw new NotSupportedException($"DateTime static property {node.Member.Name} is not supported");
-            }
-        }
-
-        // If accessing a member of the parameter (e.g., p.FirstName)
-        if (node.Expression is ParameterExpression param)
-        {
-            // Special handling for IGrouping parameters (e.g., g.Key in GroupBy)
-            if (param.Type.IsGenericType && param.Type.GetGenericTypeDefinition().Name.Contains("IGrouping"))
-            {
-                _logger.LogDebug("Processing IGrouping parameter property: {Property}", node.Member.Name);
-                
-                // g.Key should map to the GROUP BY expression from the last GroupByFragment
-                if (node.Member.Name == "Key")
-                {
-                    var groupByFragment = _context.FragmentSequence.OfType<GroupByFragment>().LastOrDefault();
-                    if (groupByFragment == null)
-                    {
-                        throw new InvalidOperationException("GroupBy fragment not found in context for g.Key access");
-                    }
-                    _logger.LogDebug("Mapped g.Key to GROUP BY expression: {Expression}", groupByFragment.Expression);
-                    return Expression.Constant(groupByFragment.Expression);
-                }
-                
-                throw new NotSupportedException($"IGrouping property '{node.Member.Name}' is not supported. Use g.Key for the grouping key.");
-            }
-            
-            // Special handling for path segment parameters
-            if (typeof(IGraphPathSegment).IsAssignableFrom(param.Type))
-            {
-                _logger.LogDebug("Processing path segment parameter property: {Property}", node.Member.Name);
-
-                var propertyMapping = node.Member.Name switch
-                {
-                    nameof(IGraphPathSegment.StartNode) => _sourceAlias ?? "src0",
-                    nameof(IGraphPathSegment.EndNode) => _targetAlias ?? "tgt0", 
-                    nameof(IGraphPathSegment.Relationship) => _relationshipAlias ?? "r0",
-                    _ => throw new NotSupportedException($"Path segment property '{node.Member.Name}' is not supported")
-                };
-
-                _logger.LogDebug("Mapped path segment property {Property} to alias {Alias}", node.Member.Name, propertyMapping);
-                return Expression.Constant(propertyMapping);
-            }
-
-            // Map C# property names to AGE property names
-            var propertyName = MapPropertyName(node.Member.Name);
-            return Expression.Constant($"{_alias}.{propertyName}");
-        }
-
-        // Handle path segment property access through nested member expressions (e.g., ps.EndNode.FirstName)
-        if (node.Expression is MemberExpression nestedMember &&
-            nestedMember.Expression is ParameterExpression nestedParam &&
-            typeof(IGraphPathSegment).IsAssignableFrom(nestedParam.Type))
-        {
-            _logger.LogDebug("Processing nested path segment property access: {Expression}", node);
-
-            var segmentProperty = nestedMember.Member.Name;
-            var nodeProperty = node.Member.Name;
-
-            var alias = segmentProperty switch
-            {
-                nameof(IGraphPathSegment.StartNode) => _sourceAlias ?? "src0",
-                nameof(IGraphPathSegment.EndNode) => _targetAlias ?? "tgt0",
-                nameof(IGraphPathSegment.Relationship) => _relationshipAlias ?? "r0",
-                _ => throw new NotSupportedException($"Path segment property '{segmentProperty}' is not supported")
-            };
-
-            _logger.LogDebug("Path segment alias mapping: {SegmentProperty} -> {Alias} (source={Source}, target={Target}, rel={Rel})", 
-                segmentProperty, alias, _sourceAlias, _targetAlias, _relationshipAlias);
-            
-            // Add debug logging to identify the problem
-            if (segmentProperty == nameof(IGraphPathSegment.StartNode) && _sourceAlias == null)
-            {
-                _logger.LogError("CRITICAL: _sourceAlias is null for StartNode access - falling back to 'src'");
-            }
-            if (segmentProperty == nameof(IGraphPathSegment.Relationship) && _relationshipAlias == null)
-            {
-                _logger.LogError("CRITICAL: _relationshipAlias is null for Relationship access - falling back to 'r'");
-            }
-
-            // Map C# property names to AGE property names
-            var propertyName = MapPropertyName(nodeProperty);
-            var result = $"{alias}.{propertyName}";
-            _logger.LogDebug("Mapped path segment nested property {SegmentProperty}.{NodeProperty} to {Result}", 
-                segmentProperty, nodeProperty, result);
-            return Expression.Constant(result);
-        }
-
-        // Handle member access on a converted parameter (e.g., ((IEntity)p).Id)
-        if (node.Expression is UnaryExpression unary && 
-            (unary.NodeType == ExpressionType.Convert || unary.NodeType == ExpressionType.ConvertChecked) &&
-            unary.Operand is ParameterExpression)
-        {
-            // Map C# property names to AGE property names
-            var propertyName = MapPropertyName(node.Member.Name);
-            return Expression.Constant($"{_alias}.{propertyName}");
-        }
-
-        // Handle chained member access (e.g., p.FirstName.Length, p.Address.City)
-        if (node.Expression is MemberExpression innerMember)
-        {
-            // Special case: string.Length property
-            if (node.Member.Name == "Length" && node.Member.DeclaringType == typeof(string))
-            {
-                var innerValue = VisitAndReturnCypher(innerMember);
-                return Expression.Constant($"size({innerValue})");
-            }
-
-            // Special case: DateTime properties (Year, Month, Day, etc.)
-            if (node.Member.DeclaringType == typeof(DateTime))
-            {
-                var innerValue = VisitAndReturnCypher(innerMember);
-                return node.Member.Name switch
-                {
-                    "Year" => Expression.Constant($"toInteger(substring({innerValue}, 0, 4))"),
-                    "Month" => Expression.Constant($"toInteger(substring({innerValue}, 5, 2))"),
-                    "Day" => Expression.Constant($"toInteger(substring({innerValue}, 8, 2))"),
-                    "Hour" => Expression.Constant($"toInteger(substring({innerValue}, 11, 2))"),
-                    "Minute" => Expression.Constant($"toInteger(substring({innerValue}, 14, 2))"),
-                    "Second" => Expression.Constant($"toInteger(substring({innerValue}, 17, 2))"),
-                    "DayOfWeek" => Expression.Constant($"toInteger(substring({innerValue}, 0, 4)) % 7"), // Approximate
-                    _ => throw new NotSupportedException($"DateTime property {node.Member.Name} is not supported")
-                };
-            }
-
-            // Handle nested property access (e.g., p.Address.City, c.A.B.Property1)
-            // Build the property path by walking up the member expression chain
-            var propertyPath = new List<string>();
-            var current = node;
-            Expression? baseExpression = null;
-            
-            while (current != null)
-            {
-                propertyPath.Insert(0, MapPropertyName(current.Member.Name));
-                
-                if (current.Expression is MemberExpression nextMember)
-                {
-                    current = nextMember;
-                }
-                else if (current.Expression is ParameterExpression baseParam)
-                {
-                    baseExpression = baseParam;
-                    break;
-                }
-                else if (current.Expression is UnaryExpression unaryExpr && 
-                         (unaryExpr.NodeType == ExpressionType.Convert || unaryExpr.NodeType == ExpressionType.ConvertChecked) &&
-                         unaryExpr.Operand is ParameterExpression convertedParam)
-                {
-                    baseExpression = convertedParam;
-                    break;
-                }
-                else
-                {
-                    // Not a simple parameter chain, try evaluation
-                    current = null;
-                }
-            }
-            
-            // If we found a parameter at the base, construct the nested property path
-            if (baseExpression is ParameterExpression bpExpr)
-            {
-                // Special handling for IGrouping parameters (e.g., group.Key.FirstName)
-                if (bpExpr.Type.IsGenericType && bpExpr.Type.GetGenericTypeDefinition().Name.Contains("IGrouping"))
-                {
-                    // The first property path element should be "Key"
-                    // Map group.Key to the GROUP BY expression, then append remaining properties
-                    if (propertyPath.Count > 0 && propertyPath[0] == "Key")
-                    {
-                        var groupByFragment = _context.FragmentSequence.OfType<GroupByFragment>().LastOrDefault();
-                        if (groupByFragment == null)
-                            throw new InvalidOperationException("GroupBy fragment not found for IGrouping.Key access");
-
-                        var resolvedKey = groupByFragment.Expression;
-                        var remainingPath = propertyPath.Skip(1).ToList();
-                        var resolvedPath = remainingPath.Count > 0
-                            ? $"{resolvedKey}.{string.Join(".", remainingPath)}"
-                            : resolvedKey;
-                        _logger.LogDebug("Mapped IGrouping chain access to {Path}", resolvedPath);
-                        return Expression.Constant(resolvedPath);
-                    }
-                    
-                    throw new NotSupportedException($"IGrouping property '{propertyPath.FirstOrDefault()}' is not supported. Use group.Key");
-                }
-
-                var fp = $"{_alias}.{string.Join(".", propertyPath)}";
-                _logger.LogDebug("Mapped nested property access to {Path}", fp);
-                return Expression.Constant(fp);
-            }
-        }
-
-        // Otherwise, evaluate the member access (e.g., local variable)
-        try
-        {
-            var objectMember = Expression.Convert(node, typeof(object));
-            var getterLambda = Expression.Lambda<Func<object>>(objectMember);
-            var getter = getterLambda.Compile();
-            var value = getter();
-
-            var paramRef = AddParameter(value);
-            return Expression.Constant(paramRef);
-        }
-        catch
-        {
-            throw new NotSupportedException($"Cannot evaluate member expression: {node}");
-        }
+        return _memberHandler.VisitMember(node);
     }
 
     protected override Expression VisitConstant(ConstantExpression node)
