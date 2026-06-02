@@ -18,8 +18,6 @@ using System.Collections.Concurrent;
 using Cvoya.Graph.Model;
 using Cvoya.Graph.Model.Age.Core.Entities;
 using Cvoya.Graph.Model.Age.Core.Internal;
-using Cvoya.Graph.Model.Age.Querying.Linq.Providers;
-using Cvoya.Graph.Model.Age.Querying.Linq.Queryables;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 
@@ -322,111 +320,26 @@ internal sealed class AgeGraph : IGraph
     }
 
     /// <inheritdoc />
-    public async Task<IGraphQueryable<IEntity>> SearchAsync(string query, IGraphTransaction? transaction = null)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query, nameof(query));
-        return await GraphOperationHelper.ExecuteAsync(
-            logger,
-            $"Failed to create search queryable for query: {query}",
-            async () =>
-            {
-                logger.LogDebug("Performing AGE full text search on all entities with query: {Query}", query);
-
-                AgeGraphTransaction? ageTx = transaction != null
-                    ? await TransactionHelpers.GetOrCreateTransactionAsync(graphContext, transaction, true)
-                    : null;
-
-                var provider = new AgeGraphQueryProvider(graphContext, ageTx);
-                var searchExpression = new Querying.Linq.Queryables.AgeFullTextSearchExpression(query, typeof(IEntity));
-                return (IGraphQueryable<IEntity>)new Querying.Linq.Queryables.AgeGraphQueryable<IEntity>(provider, graphContext, searchExpression);
-            }).ConfigureAwait(false);
-    }
+    public Task<IGraphQueryable<IEntity>> SearchAsync(string query, IGraphTransaction? transaction = null)
+        => GraphSearchHelper.SearchAsync(query, graphContext, transaction, logger);
 
     /// <inheritdoc />
-    public async Task<IGraphNodeQueryable<INode>> SearchNodesAsync(string query, IGraphTransaction? transaction = null)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query, nameof(query));
-        return await GraphOperationHelper.ExecuteAsync(
-            logger,
-            $"Failed to create node search queryable for query: {query}",
-            async () =>
-            {
-                logger.LogDebug("Performing AGE full text search on nodes with query: {Query}", query);
-
-                AgeGraphTransaction? ageTx = transaction != null
-                    ? await TransactionHelpers.GetOrCreateTransactionAsync(graphContext, transaction, true)
-                    : null;
-
-                var provider = new AgeGraphQueryProvider(graphContext, ageTx);
-                var searchExpression = new Querying.Linq.Queryables.AgeFullTextSearchExpression(query, typeof(INode));
-                return (IGraphNodeQueryable<INode>)new Querying.Linq.Queryables.AgeGraphNodeQueryable<INode>(provider, graphContext, searchExpression);
-            }).ConfigureAwait(false);
-    }
+    public Task<IGraphNodeQueryable<INode>> SearchNodesAsync(string query, IGraphTransaction? transaction = null)
+        => GraphSearchHelper.SearchNodesAsync(query, graphContext, transaction, logger);
 
     /// <inheritdoc />
-    public async Task<IGraphRelationshipQueryable<IRelationship>> SearchRelationshipsAsync(string query, IGraphTransaction? transaction = null)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query, nameof(query));
-        return await GraphOperationHelper.ExecuteAsync(
-            logger,
-            $"Failed to create relationship search queryable for query: {query}",
-            async () =>
-            {
-                logger.LogDebug("Performing AGE full text search on relationships with query: {Query}", query);
-
-                AgeGraphTransaction? ageTx = transaction != null
-                    ? await TransactionHelpers.GetOrCreateTransactionAsync(graphContext, transaction, true)
-                    : null;
-
-                var provider = new AgeGraphQueryProvider(graphContext, ageTx);
-                var searchExpression = new Querying.Linq.Queryables.AgeFullTextSearchExpression(query, typeof(IRelationship));
-                return (IGraphRelationshipQueryable<IRelationship>)new Querying.Linq.Queryables.AgeGraphRelationshipQueryable<IRelationship>(provider, graphContext, searchExpression);
-            }).ConfigureAwait(false);
-    }
+    public Task<IGraphRelationshipQueryable<IRelationship>> SearchRelationshipsAsync(string query, IGraphTransaction? transaction = null)
+        => GraphSearchHelper.SearchRelationshipsAsync(query, graphContext, transaction, logger);
 
     /// <inheritdoc />
-    public async Task<IGraphNodeQueryable<T>> SearchNodesAsync<T>(string query, IGraphTransaction? transaction = null)
+    public Task<IGraphNodeQueryable<T>> SearchNodesAsync<T>(string query, IGraphTransaction? transaction = null)
         where T : INode
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query, nameof(query));
-        return await GraphOperationHelper.ExecuteAsync(
-            logger,
-            $"Failed to create typed node search queryable for type {typeof(T).Name} and query: {query}",
-            async () =>
-            {
-                logger.LogDebug("Performing AGE full text search on nodes of type {NodeType} with query: {Query}", typeof(T).Name, query);
-
-                AgeGraphTransaction? ageTx = transaction != null
-                    ? await TransactionHelpers.GetOrCreateTransactionAsync(graphContext, transaction, true)
-                    : null;
-
-                var provider = new AgeGraphQueryProvider(graphContext, ageTx);
-                var searchExpression = new Querying.Linq.Queryables.AgeFullTextSearchExpression(query, typeof(T));
-                return (IGraphNodeQueryable<T>)new Querying.Linq.Queryables.AgeGraphNodeQueryable<T>(provider, graphContext, searchExpression);
-            }).ConfigureAwait(false);
-    }
+        => GraphSearchHelper.SearchNodesAsync<T>(query, graphContext, transaction, logger);
 
     /// <inheritdoc />
-    public async Task<IGraphRelationshipQueryable<T>> SearchRelationshipsAsync<T>(string query, IGraphTransaction? transaction = null)
+    public Task<IGraphRelationshipQueryable<T>> SearchRelationshipsAsync<T>(string query, IGraphTransaction? transaction = null)
         where T : IRelationship
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query, nameof(query));
-        return await GraphOperationHelper.ExecuteAsync(
-            logger,
-            $"Failed to create typed relationship search queryable for type {typeof(T).Name} and query: {query}",
-            async () =>
-            {
-                logger.LogDebug("Performing AGE full text search on relationships of type {RelType} with query: {Query}", typeof(T).Name, query);
-
-                AgeGraphTransaction? ageTx = transaction != null
-                    ? await TransactionHelpers.GetOrCreateTransactionAsync(graphContext, transaction, true)
-                    : null;
-
-                var provider = new AgeGraphQueryProvider(graphContext, ageTx);
-                var searchExpression = new Querying.Linq.Queryables.AgeFullTextSearchExpression(query, typeof(T));
-                return (IGraphRelationshipQueryable<T>)new Querying.Linq.Queryables.AgeGraphRelationshipQueryable<T>(provider, graphContext, searchExpression);
-            }).ConfigureAwait(false);
-    }
+        => GraphSearchHelper.SearchRelationshipsAsync<T>(query, graphContext, transaction, logger);
 
     /// <inheritdoc />
     public Task RecreateIndexesAsync(CancellationToken cancellationToken = default)
