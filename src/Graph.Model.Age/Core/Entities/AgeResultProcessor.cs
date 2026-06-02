@@ -22,19 +22,21 @@ using Npgsql.Age.Types;
 using static Cvoya.Graph.Model.Age.Core.Entities.AgeValueConverters;
 
 /// <summary>
-/// Age-specific result processor.
+/// Age-specific result processor. Delegates multi-column row reading to EntityResultReader.
 /// </summary>
 internal sealed class AgeResultProcessor
 {
     private readonly EntityFactory _entityFactory;
     private readonly AgeEntityMapper _entityMapper;
     private readonly ILogger<AgeResultProcessor> _logger;
+    private readonly EntityResultReader _entityResultReader;
 
     public AgeResultProcessor(EntityFactory entityFactory, AgeEntityMapper entityMapper, ILoggerFactory? loggerFactory = null)
     {
         _entityFactory = entityFactory ?? throw new ArgumentNullException(nameof(entityFactory));
         _entityMapper = entityMapper ?? throw new ArgumentNullException(nameof(entityMapper));
         _logger = loggerFactory?.CreateLogger<AgeResultProcessor>() ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<AgeResultProcessor>.Instance;
+        _entityResultReader = new EntityResultReader(entityFactory, entityMapper, _logger);
     }
 
     public async Task<List<EntityInfo>> ProcessAsync(
@@ -55,7 +57,7 @@ internal sealed class AgeResultProcessor
                 // to ReadMultiColumnRowAsync which handles all columns including nulls
                 if (reader.FieldCount > 1 && !typeof(INode).IsAssignableFrom(elementType) && !typeof(IRelationship).IsAssignableFrom(elementType))
                 {
-                    var entityInfo = await ReadMultiColumnRowAsync(reader, elementType, cancellationToken).ConfigureAwait(false);
+                    var entityInfo = await _entityResultReader.ReadMultiColumnRowAsync(reader, elementType, cancellationToken).ConfigureAwait(false);
                     if (entityInfo != null)
                         results.Add(entityInfo);
                     continue;
@@ -87,7 +89,7 @@ internal sealed class AgeResultProcessor
                     // an EntityInfo with properties matching column names.
                     // This enables ResultMaterializer.CreateAnonymousTypeObject to construct
                     // the anonymous type or complex type instances from the EntityInfo.
-                    var entityInfo = await ReadMultiColumnRowAsync(reader, elementType, cancellationToken).ConfigureAwait(false);
+                    var entityInfo = await _entityResultReader.ReadMultiColumnRowAsync(reader, elementType, cancellationToken).ConfigureAwait(false);
                     if (entityInfo != null)
                     {
                         results.Add(entityInfo);
@@ -127,280 +129,4 @@ internal sealed class AgeResultProcessor
 
         return results;
     }
-
-    /// <summary>
-    /// Reads a multi-column row from the reader and builds an EntityInfo with simple properties
-    /// matching the column names. This supports anonymous type projections like
-    /// .Select(p => new { p.Name, p.Age }) where the RETURN clause produces multiple columns.
-    /// </summary>
-    private async Task<EntityInfo?> ReadMultiColumnRowAsync(
-        NpgsqlDataReader reader,
-        Type elementType,
-        CancellationToken cancellationToken)
-    {
-        var simpleProps = new Dictionary<string, Property>(StringComparer.Ordinal);
-        var complexProps = new Dictionary<string, Property>(StringComparer.Ordinal);
-        var fieldCount = reader.FieldCount;
-
-        for (int i = 0; i < fieldCount; i++)
-        {
-            // Get the column name and strip the "c_" prefix added by BuildColumnDefinitions
-            var columnName = reader.GetName(i);
-            var propertyName = columnName.StartsWith("c_", StringComparison.Ordinal)
-                ? columnName.Substring(2)
-                : columnName;
-
-            // Map path segment aliases to the property names expected by the
-            // ResultMaterializer.CreatePathSegmentFromEntityInfo.
-            if (columnName is "src0" or "src1" or "src2" or "src3" or "src4")
-                propertyName = "StartNode";
-            else if (columnName is "r0" or "r1" or "r2" or "r3" or "r4")
-                propertyName = "Relationship";
-            else if (columnName is "tgt0" or "tgt1" or "tgt2" or "tgt3" or "tgt4")
-                propertyName = "EndNode";
-
-            if (await reader.IsDBNullAsync(i, cancellationToken).ConfigureAwait(false))
-                continue;
-
-            try
-            {
-                var agVal = reader.GetFieldValue<Agtype>(i);
-                string agStr;
-                try { agStr = agVal.GetString() ?? agVal.ToString()!; } catch { agStr = agVal.ToString() ?? "null"; }
-                _logger.LogDebug("ReadMultiColumnRowAsync: Column {ColName} (prop {PropName}), IsVertex={IsV}, IsEdge={IsE}, AgStr={AgStr}",
-                    columnName, propertyName, agVal.IsVertex, agVal.IsEdge,
-                    agStr?.Substring(0, Math.Min(100, agStr.Length)));
-
-                if (agVal.IsVertex)
-                {
-                    var vertex = agVal.GetVertex();
-                    var nestedTarget = elementType.GetProperty(propertyName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)?.PropertyType ?? typeof(object);
-                    var nestedEntityInfo = _entityMapper.MapVertex(vertex, nestedTarget);
-                    complexProps[propertyName] = new Property(null!, propertyName, false, nestedEntityInfo);
-                }
-                else if (agVal.IsEdge)
-                {
-                    var edge = agVal.GetEdge();
-                    var nestedTarget = elementType.GetProperty(propertyName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)?.PropertyType ?? typeof(object);
-                    var nestedEntityInfo = _entityMapper.MapEdge(edge, nestedTarget);
-                    complexProps[propertyName] = new Property(null!, propertyName, false, nestedEntityInfo);
-                }
-                else
-                {
-                    // Determine target type from elementType's matching property
-                    var targetProp = elementType.GetProperty(propertyName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase);
-                    var targetType = targetProp?.PropertyType ?? typeof(string);
-                    object? convertedValue = null;
-
-                    // Check for Agtype list/array (from collect() expressions)
-                    if (targetType.IsGenericType &&
-                        (targetType.GetGenericTypeDefinition() == typeof(List<>) ||
-                         targetType.GetGenericTypeDefinition() == typeof(IList<>) ||
-                         targetType.GetGenericTypeDefinition() == typeof(IReadOnlyList<>)))
-                    {
-                        var listElementType = targetType.GetGenericArguments()[0];
-                        try
-                        {
-                            var agList = agVal.GetList();
-                            if (agList != null && agList.Count > 0)
-                            {
-                                _logger.LogDebug("ReadMultiColumnRowAsync: Got list for {Prop} with {Count} elements. Element types: {Types}",
-                                    propertyName, agList.Count,
-                                    string.Join(", ", agList.Take(3).Select(e => $"{e?.GetType().Name ?? "null"}({e?.ToString()?.Substring(0, Math.Min(50, e?.ToString()?.Length ?? 0))})")));
-                                var typedList = new List<object?>();
-                                foreach (var rawElem in agList)
-                                {
-                                    // In Konnektr 2.x, GetList() returns typed .NET objects directly
-                                    // (not Agtype wrappers). Vertex/Edge objects, dictionaries,
-                                    // and scalar values arrive pre-typed.
-                                    object? elemObj = rawElem switch
-                                    {
-                                        null => null,
-                                        Vertex<Dictionary<string, object>> v => v,
-                                        Edge<Dictionary<string, object>> e => e,
-                                        Dictionary<string, object> dict => ConvertDictionaryToType(dict!, listElementType),
-                                        System.Text.Json.JsonElement jsonElem =>
-                                            ConvertJsonElementToEntityInfo(jsonElem, listElementType),
-                                        _ => rawElem // scalar value, already correct type
-                                    };
-                                    typedList.Add(elemObj);
-                                }
-                                convertedValue = typedList;
-                            }
-                            else
-                            {
-                                // Empty list — create empty typed list
-                                var listType = typeof(List<>).MakeGenericType(listElementType);
-                                convertedValue = Activator.CreateInstance(listType);
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogWarning(ex, "Failed to parse Agtype list for property {Property}", propertyName);
-                        }
-                    }
-
-                    if (convertedValue == null)
-                    {
-                        // Try Agtype typed accessors first
-                        try
-                        {
-                            if (targetType == typeof(string)) { convertedValue = agVal.GetString(); }
-                            else if (targetType == typeof(int) || targetType == typeof(int?)) { convertedValue = agVal.GetInt32(); }
-                            else if (targetType == typeof(long) || targetType == typeof(long?)) { convertedValue = agVal.GetInt64(); }
-                            else if (targetType == typeof(double) || targetType == typeof(double?)) { convertedValue = agVal.GetDouble(); }
-                            else if (targetType == typeof(float) || targetType == typeof(float?)) { convertedValue = agVal.GetFloat(); }
-                            else if (targetType == typeof(decimal) || targetType == typeof(decimal?)) { convertedValue = agVal.GetDecimal(); }
-                            else if (targetType == typeof(bool) || targetType == typeof(bool?)) { convertedValue = agVal.GetBoolean(); }
-                            else if (targetType == typeof(DateTime) || targetType == typeof(DateTime?))
-                            {
-                                var strVal = agVal.ToString()?.Trim('"', ' ', '\'');
-                                DateTime dtVal;
-                                var parsed = DateTime.TryParse(strVal, System.Globalization.CultureInfo.InvariantCulture,
-                                    System.Globalization.DateTimeStyles.RoundtripKind, out dtVal)
-                                    || DateTime.TryParseExact(strVal,
-                                        ["yyyy-MM-ddTHH:mm:ss.FFFFFFF", "yyyy-MM-ddTHH:mm:ss", "yyyy-MM-dd",
-                                         "yyyy-MM-dd HH:mm:ss.FFFFFFF", "yyyy-MM-dd HH:mm:ss"],
-                                        System.Globalization.CultureInfo.InvariantCulture,
-                                        System.Globalization.DateTimeStyles.RoundtripKind, out dtVal);
-                                if (parsed)
-                                    convertedValue = dtVal.Kind == DateTimeKind.Unspecified
-                                        ? DateTime.SpecifyKind(dtVal, DateTimeKind.Local) : dtVal;
-                            }
-                        }
-                        catch
-                        {
-                            // Typed accessor failed — fall back below
-                        }
-                    }
-
-                    // If typed accessor didn't produce a value, try getting as string and converting
-                    if (convertedValue == null)
-                    {
-                        try { convertedValue = agVal.GetString(); }
-                        catch { /* ignore */ }
-                    }
-
-                    // If still null and target is a complex type, try JSON deserialization.
-                    // In Konnektr 2.x, the InferredObjectConverter pre-deserializes objects as
-                    // Dictionary<string, object>, but in the query result path, complex property
-                    // values may arrive as Agtype containing a JSON map. Deserialize it to the
-                    // target C# type so the generated serializer can process it as a SimpleValue.
-                    if (convertedValue == null && targetType != null && targetType != typeof(string)
-                        && !GraphDataModel.IsSimple(targetType)
-                        && !typeof(System.Collections.IDictionary).IsAssignableFrom(targetType))
-                    {
-                        try
-                        {
-                            var text = agVal.ToString();
-                            if (!string.IsNullOrEmpty(text) && text.TrimStart().StartsWith("{"))
-                            {
-                                var result = System.Text.Json.JsonSerializer.Deserialize(
-                                    text, targetType,
-                                    new System.Text.Json.JsonSerializerOptions
-                                    {
-                                        PropertyNameCaseInsensitive = true
-                                    });
-                                if (result != null)
-                                {
-                                    convertedValue = result;
-                                    _logger.LogDebug("ReadMultiColumnRowAsync: Deserialized Agtype map to {Target} for property {Prop}",
-                                        targetType.Name, propertyName);
-                                }
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogWarning(ex, "ReadMultiColumnRowAsync: Failed to deserialize complex property {Prop} to {Target}",
-                                propertyName, targetType.Name);
-                        }
-                    }
-
-                    // If still null, try parsing from the string representation
-                    if (convertedValue == null && targetType != null)
-                        convertedValue = ConvertScalarAgtype(agVal.ToString() ?? string.Empty, targetType);
-                    else if (convertedValue == null)
-                        convertedValue = agVal.ToString();
-
-                    if (convertedValue != null)
-                        simpleProps[propertyName] = new Property(null!, propertyName, false,
-                            new SimpleValue(convertedValue, convertedValue.GetType()));
-                }
-            }
-            catch (Exception ex)
-            {
-                // Skip columns that can't be read
-                _logger.LogWarning(ex, "ReadMultiColumnRowAsync: Failed to read column {ColumnName} (property {PropertyName})", columnName, propertyName);
-            }
-        }
-
-        // Group path segment columns (_src, _r, _tgt suffixes) into single complex properties.
-        // For example, Foo_src + Foo_r + Foo_tgt → Foo (EntityInfo with StartNode, Relationship, EndNode)
-        var pathSegmentKeys = complexProps.Keys
-            .Where(k => k.EndsWith("_src", StringComparison.Ordinal) ||
-                        k.EndsWith("_r", StringComparison.Ordinal) ||
-                        k.EndsWith("_tgt", StringComparison.Ordinal))
-            .Select(k => k.Length > 4 ? k.Substring(0, k.Length - 4) : k)
-            .Distinct()
-            .ToList();
-
-        foreach (var baseKey in pathSegmentKeys)
-        {
-            var srcKey = $"{baseKey}_src";
-            var relKey = $"{baseKey}_r";
-            var tgtKey = $"{baseKey}_tgt";
-
-            if (complexProps.TryGetValue(srcKey, out var srcProp) &&
-                complexProps.TryGetValue(tgtKey, out var tgtProp))
-            {
-                complexProps.Remove(srcKey);
-                complexProps.Remove(tgtKey);
-
-                var segmentSimpleProps = new Dictionary<string, Property>(StringComparer.Ordinal);
-                var segmentComplexProps = new Dictionary<string, Property>(StringComparer.Ordinal);
-
-                if (srcProp.Value is EntityInfo srcEntity)
-                    segmentComplexProps["StartNode"] = new Property(null!, "StartNode", false, srcEntity);
-                if (tgtProp.Value is EntityInfo tgtEntity)
-                    segmentComplexProps["EndNode"] = new Property(null!, "EndNode", false, tgtEntity);
-
-                if (complexProps.TryGetValue(relKey, out var relProp))
-                {
-                    complexProps.Remove(relKey);
-                    if (relProp.Value is EntityInfo relEntity)
-                        segmentComplexProps["Relationship"] = new Property(null!, "Relationship", false, relEntity);
-                }
-
-                // Determine the target path segment type from elementType
-                var segmentTargetType = elementType.GetProperty(baseKey, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)?.PropertyType
-                    ?? typeof(object);
-
-                var segmentEntityInfo = new EntityInfo(
-                    segmentTargetType,
-                    string.Empty,
-                    Array.Empty<string>(),
-                    segmentSimpleProps,
-                    segmentComplexProps);
-
-                complexProps[baseKey] = new Property(null!, baseKey, false, segmentEntityInfo);
-            }
-        }
-
-        if (simpleProps.Count == 0 && complexProps.Count == 0)
-            return null;
-
-        return new EntityInfo(
-            elementType,
-            string.Empty,
-            Array.Empty<string>(),
-            simpleProps,
-            complexProps);
-    }
-
-    /// <summary>
-    /// Converts a Dictionary&lt;string, object?&gt; to the specified target type via JSON round-trip.
-    /// </summary>
-    // All private static converter methods (ConvertDictionaryToType, ConvertScalarAgtype,
-    // ConvertSingleAgtypeElement, ConvertAgtypeMapToEntityInfo, ConvertJsonElementToEntityInfo,
-    // ConvertJsonNumber) moved to AgeValueConverters and imported via `using static`.
 }
