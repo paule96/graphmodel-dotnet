@@ -42,47 +42,11 @@ internal sealed class AgeEntityMapper
         var labels = ExtractLabels(vertex);
 
         // Resolve the most derived type for class hierarchy support.
-        // When querying by base type (e.g., Person), if the stored label corresponds to
-        // a derived type (e.g., Manager), we need to deserialize as the derived type.
-        // First try from inheritance_labels (most derived label in the hierarchy),
-        // then fall back to the vertex label.
-        var resolvedType = targetType;
-        var typeResolutionLabel = labels.FirstOrDefault() ?? label;
-        if (!string.IsNullOrWhiteSpace(typeResolutionLabel))
+        var resolvedType = EntityTypeResolver.ResolveType(targetType, label, labels);
+        if (resolvedType != targetType)
         {
-            try
-            {
-                Type? mostDerived;
-
-                // If the target type is an interface (e.g., INode), resolve the concrete
-                // type directly from the vertex label.
-                if (targetType.IsInterface)
-                {
-                    try
-                    {
-                        mostDerived = Labels.GetTypeFromLabel(typeResolutionLabel);
-                    }
-                    catch
-                    {
-                        mostDerived = null;
-                    }
-                }
-                else
-                {
-                    mostDerived = Labels.GetMostDerivedType(targetType, typeResolutionLabel);
-                }
-
-                if (mostDerived != null)
-                {
-                    resolvedType = mostDerived;
-                    _logger.LogDebug("MapVertex: Resolved type from label '{Label}': {Type} (was {OriginalType})",
-                        typeResolutionLabel, resolvedType.Name, targetType.Name);
-                }
-            }
-            catch
-            {
-                // If resolution fails, fall back to the original target type
-            }
+            _logger.LogDebug("MapVertex: Resolved type from label '{Label}': {Type} (was {OriginalType})",
+                labels.FirstOrDefault() ?? label, resolvedType.Name, targetType.Name);
         }
 
         var simpleProperties = new Dictionary<string, Property>(StringComparer.Ordinal);
@@ -114,13 +78,13 @@ internal sealed class AgeEntityMapper
             if (rawValue is JsonElement rawJson && rawJson.ValueKind == JsonValueKind.Object
                 && propertyType != null && !GraphDataModel.IsSimple(propertyType))
             {
-                convertedValue = ConvertJsonElementToDictionary(rawJson);
+                convertedValue = EntityInfoBuilder.ConvertJsonElementToDictionary(rawJson);
             }
             // Also handle the case where ConvertValue returns a JsonElement for complex types
             else if (convertedValue is JsonElement convJson && convJson.ValueKind == JsonValueKind.Object
                 && propertyType != null && !GraphDataModel.IsSimple(propertyType))
             {
-                convertedValue = ConvertJsonElementToDictionary(convJson);
+                convertedValue = EntityInfoBuilder.ConvertJsonElementToDictionary(convJson);
             }
 
             // Handle JSON string that contains a serialized complex collection.
@@ -140,7 +104,7 @@ internal sealed class AgeEntityMapper
                         && doc.RootElement[0].ValueKind == JsonValueKind.Object)
                     {
                         var parsedItems = doc.RootElement.EnumerateArray()
-                            .Select(e => (object)ConvertJsonElementToDictionary(e))
+                            .Select(e => (object)EntityInfoBuilder.ConvertJsonElementToDictionary(e))
                             .Where(static item => item is IDictionary<string, object?>)
                             .ToList();
                         if (parsedItems.Count > 0)
@@ -159,8 +123,9 @@ internal sealed class AgeEntityMapper
 
             if (convertedValue is IDictionary<string, object?> dict && !GraphDataModel.IsSimple(dict.GetType()))
             {
-                var entityInfo = CreateEntityInfoFromDictionary(dict, csharpPropertyName);
+                var entityInfo = EntityInfoBuilder.CreateEntityInfoFromDictionary(dict, csharpPropertyName);
                 complexProperties[csharpPropertyName] = new Property(null!, csharpPropertyName, false, entityInfo);
+                continue;
                 continue;
             }
             else if (convertedValue is IList<object?> list)
@@ -176,9 +141,9 @@ internal sealed class AgeEntityMapper
                     var elementInfos = list.Select(item =>
                     {
                         if (item is JsonElement jsonElement)
-                            return CreateEntityInfoFromDictionary(ConvertJsonElementToDictionary(jsonElement), csharpPropertyName);
+                            return EntityInfoBuilder.CreateEntityInfoFromDictionary(EntityInfoBuilder.ConvertJsonElementToDictionary(jsonElement), csharpPropertyName);
                         if (item is IDictionary<string, object?> d)
-                            return CreateEntityInfoFromDictionary(d, csharpPropertyName);
+                            return EntityInfoBuilder.CreateEntityInfoFromDictionary(d, csharpPropertyName);
                         return new EntityInfo(typeof(object), csharpPropertyName, Array.Empty<string>(), new Dictionary<string, Property>(StringComparer.Ordinal), new Dictionary<string, Property>(StringComparer.Ordinal));
                     }).ToList();
 
@@ -186,14 +151,14 @@ internal sealed class AgeEntityMapper
                 }
                 else
                 {
-                    var elementType = DetermineElementType(list);
+                    var elementType = EntityInfoBuilder.DetermineElementType(list);
                     var simpleValues = list.Select(item => new SimpleValue(item ?? null!, item?.GetType() ?? elementType)).ToList();
                     simpleProperties[csharpPropertyName] = new Property(null!, csharpPropertyName, false, new SimpleCollection(simpleValues, elementType));
                 }
             }
             else
             {
-                simpleProperties[csharpPropertyName] = CreateSimpleProperty(csharpPropertyName, convertedValue);
+                simpleProperties[csharpPropertyName] = EntityInfoBuilder.CreateSimpleProperty(csharpPropertyName, convertedValue);
             }
         }
 
@@ -206,10 +171,10 @@ internal sealed class AgeEntityMapper
         return new EntityInfo(
             resolvedType,
             label,
-            labels,
+            labels.ToArray(),
             simpleProperties,
             complexProperties,
-            InheritanceLabels: labels
+            InheritanceLabels: labels.ToArray()
         );
     }
 
@@ -219,43 +184,11 @@ internal sealed class AgeEntityMapper
         var allLabels = ExtractLabels(edge);
 
         // Resolve the most derived type for relationship hierarchy support.
-        var resolvedType = targetType;
-        var typeResolutionLabel = allLabels.FirstOrDefault() ?? label;
-        if (!string.IsNullOrWhiteSpace(typeResolutionLabel))
+        var resolvedType = EntityTypeResolver.ResolveType(targetType, label, allLabels);
+        if (resolvedType != targetType)
         {
-            try
-            {
-                Type? mostDerived;
-
-                // If the target type is an interface (e.g., IRelationship), resolve the concrete
-                // type directly from the edge label instead of walking the hierarchy.
-                if (targetType.IsInterface)
-                {
-                    try
-                    {
-                        mostDerived = Labels.GetTypeFromLabel(typeResolutionLabel);
-                    }
-                    catch
-                    {
-                        mostDerived = null;
-                    }
-                }
-                else
-                {
-                    mostDerived = Labels.GetMostDerivedType(targetType, typeResolutionLabel);
-                }
-
-                if (mostDerived != null)
-                {
-                    resolvedType = mostDerived;
-                    _logger.LogDebug("MapEdge: Resolved type from label '{Label}': {Type} (was {OriginalType})",
-                        typeResolutionLabel, resolvedType.Name, targetType.Name);
-                }
-            }
-            catch
-            {
-                // If resolution fails, fall back to the original target type
-            }
+            _logger.LogDebug("MapEdge: Resolved type from label '{Label}': {Type} (was {OriginalType})",
+                allLabels.FirstOrDefault() ?? label, resolvedType.Name, targetType.Name);
         }
 
         var simpleProperties = new Dictionary<string, Property>(StringComparer.Ordinal);
@@ -271,7 +204,7 @@ internal sealed class AgeEntityMapper
             var propertyInfo = resolvedType.GetProperty(csharpPropertyName);
             var propertyType = propertyInfo?.PropertyType;
             var convertedValue = ConvertValue(value, csharpPropertyName, propertyType);
-            simpleProperties[csharpPropertyName] = CreateSimpleProperty(csharpPropertyName, convertedValue);
+            simpleProperties[csharpPropertyName] = EntityInfoBuilder.CreateSimpleProperty(csharpPropertyName, convertedValue);
         }
 
         if (!simpleProperties.ContainsKey(nameof(IRelationship.Id)))
@@ -288,14 +221,13 @@ internal sealed class AgeEntityMapper
             false,
             new SimpleValue(edge.Label, typeof(string)));
 
-        var inheritanceLabels = allLabels;
         return new EntityInfo(
             resolvedType,
             edge.Label,
-            allLabels,
+            allLabels.ToArray(),
             simpleProperties,
             new Dictionary<string, Property>(StringComparer.Ordinal),
-            InheritanceLabels: inheritanceLabels
+            InheritanceLabels: allLabels.ToArray()
         );
     }
 
@@ -307,9 +239,6 @@ internal sealed class AgeEntityMapper
             _ => ageKey
         };
     }
-
-    // ExtractLabels(Vertex) and ExtractLabels(Edge) moved to LabelsExtractor
-    // and imported via `using static LabelsExtractor`.
 
     private static object? NormalizeValue(object? rawValue)
     {
@@ -351,7 +280,7 @@ internal sealed class AgeEntityMapper
                 case not null when effectiveType == typeof(Guid):
                     return jsonElement.GetGuid();
                 case not null when effectiveType == typeof(Point):
-                    return ParsePointFromJson(jsonElement);
+                    return EntityInfoBuilder.ParsePointFromJson(jsonElement);
                 default:
                     return jsonElement.ToString()!;
             }
@@ -364,7 +293,7 @@ internal sealed class AgeEntityMapper
             if (effectiveType == typeof(DateTimeOffset))
                 return DateTimeOffset.Parse(strVal, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
             if (effectiveType == typeof(Point))
-                return ParsePointFromJson(JsonDocument.Parse(strVal).RootElement);
+                return EntityInfoBuilder.ParsePointFromJson(JsonDocument.Parse(strVal).RootElement);
             if (effectiveType == typeof(bool))
             {
                 if (strVal.Equals("true", StringComparison.OrdinalIgnoreCase) || strVal == "1") return true;
@@ -426,115 +355,5 @@ internal sealed class AgeEntityMapper
         }
 
         return value;
-    }
-
-    private static Point ParsePointFromJson(JsonElement json)
-    {
-        double longitude = 0, latitude = 0, height = 0;
-        if (json.TryGetProperty("longitude", out var lon)) longitude = lon.GetDouble();
-        else if (json.TryGetProperty("Longitude", out lon)) longitude = lon.GetDouble();
-        else if (json.TryGetProperty("x", out var x)) longitude = x.GetDouble();
-        else if (json.ValueKind == JsonValueKind.Array && json.GetArrayLength() >= 2)
-        {
-            longitude = json[0].GetDouble();
-            latitude = json[1].GetDouble();
-            if (json.GetArrayLength() >= 3) height = json[2].GetDouble();
-            return new Point { Longitude = longitude, Latitude = latitude, Height = height };
-        }
-        if (json.TryGetProperty("latitude", out var lat)) latitude = lat.GetDouble();
-        else if (json.TryGetProperty("Latitude", out lat)) latitude = lat.GetDouble();
-        else if (json.TryGetProperty("y", out var y)) latitude = y.GetDouble();
-        if (json.TryGetProperty("height", out var h)) height = h.GetDouble();
-        else if (json.TryGetProperty("Height", out h)) height = h.GetDouble();
-        else if (json.TryGetProperty("z", out var z)) height = z.GetDouble();
-        return new Point { Longitude = longitude, Latitude = latitude, Height = height };
-    }
-
-    private static Property CreateSimpleProperty(string name, object? value)
-    {
-        if (value is null)
-            return new Property(null!, name, false, new SimpleValue(null!, typeof(object)));
-        return new Property(null!, name, false, new SimpleValue(value, value.GetType()));
-    }
-
-    private static EntityInfo CreateEntityInfoFromDictionary(IDictionary<string, object?> dict, string typeName)
-    {
-        var simpleProps = new Dictionary<string, Property>(StringComparer.Ordinal);
-        var complexProps = new Dictionary<string, Property>(StringComparer.Ordinal);
-        foreach (var (key, val) in dict)
-        {
-            if (val is IDictionary<string, object?> nestedDict)
-            {
-                // Nested complex object — recurse to create nested EntityInfo
-                var nestedEntityInfo = CreateEntityInfoFromDictionary(nestedDict, key);
-                complexProps[key] = new Property(null!, key, false, nestedEntityInfo);
-            }
-            else if (val is IList<object?> list)
-            {
-                // Check if this is a collection of complex objects
-                if (list.Count > 0 && list[0] is IDictionary<string, object?>)
-                {
-                    var elementInfos = list
-                        .Select(item => item is IDictionary<string, object?> d
-                            ? CreateEntityInfoFromDictionary(d, key)
-                            : new EntityInfo(typeof(object), key, Array.Empty<string>(),
-                                new Dictionary<string, Property>(StringComparer.Ordinal),
-                                new Dictionary<string, Property>(StringComparer.Ordinal)))
-                        .ToList();
-                    complexProps[key] = new Property(null!, key, false, new EntityCollection(typeof(object), elementInfos));
-                }
-                else
-                {
-                    var elementType = DetermineElementType(list);
-                    var simpleValues = list.Select(item => new SimpleValue(item ?? null!, item?.GetType() ?? elementType)).ToList();
-                    simpleProps[key] = new Property(null!, key, false, new SimpleCollection(simpleValues, elementType));
-                }
-            }
-            else
-            {
-                simpleProps[key] = CreateSimpleProperty(key, val);
-            }
-        }
-        return new EntityInfo(typeof(object), typeName, Array.Empty<string>(), simpleProps, complexProps);
-    }
-
-    private static Dictionary<string, object?> ConvertJsonElementToDictionary(JsonElement element)
-    {
-        var dict = new Dictionary<string, object?>(StringComparer.Ordinal);
-        foreach (var prop in element.EnumerateObject())
-        {
-            dict[prop.Name] = ConvertJsonElementToValue(prop.Value);
-        }
-        return dict;
-    }
-
-    private static object? ConvertJsonElementToValue(JsonElement element)
-    {
-        return element.ValueKind switch
-        {
-            JsonValueKind.String => element.GetString(),
-            JsonValueKind.Number => element.TryGetInt64(out var l) ? l : element.GetDouble(),
-            JsonValueKind.True => true,
-            JsonValueKind.False => false,
-            JsonValueKind.Object => ConvertJsonElementToDictionary(element),
-            JsonValueKind.Array => element.EnumerateArray().Select(ConvertJsonElementToValue).ToList(),
-            _ => null
-        };
-    }
-
-    private static bool IsComplexCollectionType(Type type)
-    {
-        if (!type.IsGenericType) return false;
-        var elementType = type.GetGenericArguments().FirstOrDefault();
-        return elementType != null && GraphDataModel.IsComplex(elementType);
-    }
-
-    private static Type DetermineElementType(IList<object?> list)
-    {
-        foreach (var item in list)
-        {
-            if (item != null) return item.GetType();
-        }
-        return typeof(object);
     }
 }
