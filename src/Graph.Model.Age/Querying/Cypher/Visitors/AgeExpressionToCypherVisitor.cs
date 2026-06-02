@@ -32,7 +32,7 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
     private readonly CypherQueryContext _context;
     private readonly QueryParameterStore _parameterStore;
     private readonly ILogger _logger;
-    private readonly string _alias;
+    private readonly string _alias = null!;
     private readonly ParameterExpression? _pathSegmentParameter;
     private readonly string? _sourceAlias;
     private readonly string? _relationshipAlias;
@@ -41,6 +41,7 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
     private readonly MathMethodHandler _mathHandler;
     private readonly DateTimeMethodHandler _dateTimeHandler;
     private readonly CollectionExpressionHandler _collectionHandler;
+    private readonly ClosureCaptureHandler _closureCaptureHandler;
 
     public AgeExpressionToCypherVisitor(
         CypherQueryContext context,
@@ -73,6 +74,7 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
             visit: Visit,
             addParameter: AddParameter,
             logger: _logger);
+        _closureCaptureHandler = new ClosureCaptureHandler(_logger, _sourceAlias ?? _alias ?? "src0");
     }
 
     private string AddParameter(object? value)
@@ -460,8 +462,8 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
         // Must be before the generic Count handler which would intercept all Count calls
         if (node.Method.Name == "Count")
         {
-            if (TryHandleClosureCountOnRelationship(node))
-                return Expression.Constant(HandleClosureCountOnRelationship(node));
+            if (_closureCaptureHandler.TryHandleClosureCountOnRelationship(node))
+                return Expression.Constant(_closureCaptureHandler.HandleClosureCountOnRelationship(node));
             return _collectionHandler.HandleCountMethod(node);
         }
 
@@ -734,227 +736,6 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
             _sourceAlias ?? "src0",
             _relationshipAlias ?? "r0",
             _targetAlias ?? "tgt0");
-    }
-
-    /// <summary>
-    /// Tries to detect a closure-captured IEnumerable&lt;IRelationship&gt;.Count(lambda) expression
-    /// and determines if it can be translated to a Cypher size() pattern.
-    /// Returns true if the expression matches the expected pattern.
-    /// </summary>
-    private bool TryHandleClosureCountOnRelationship(MethodCallExpression node)
-    {
-        // Handle both instance (source.Count(predicate)) and static (Enumerable.Count(source, predicate)) forms
-        Expression? sourceExpr;
-        Expression? predicateExpr;
-
-        if (node.Object != null && node.Arguments.Count == 1)
-        {
-            // Instance form: allRelationships.Count(lambda)
-            sourceExpr = node.Object;
-            predicateExpr = node.Arguments[0];
-        }
-        else if (node.Object == null && node.Arguments.Count == 2)
-        {
-            // Static form: Enumerable.Count(allRelationships, lambda)
-            sourceExpr = node.Arguments[0];
-            predicateExpr = node.Arguments[1];
-        }
-        else
-        {
-            return false;
-        }
-
-        // Check that source is a MemberExpression on a closure capture
-        if (sourceExpr is not MemberExpression memberExpr)
-            return false;
-
-        // Try to evaluate the captured value
-        object? capturedValue;
-        try
-        {
-            var capturedLambda = Expression.Lambda<Func<object>>(Expression.Convert(memberExpr, typeof(object)));
-            capturedValue = capturedLambda.Compile()();
-        }
-        catch
-        {
-            return false;
-        }
-
-        // Check if it's an IEnumerable of IRelationship
-        if (capturedValue is not System.Collections.IEnumerable enumerable)
-            return false;
-
-        // Get the element type from the collection
-        var elementType = GetEnumerableElementType(capturedValue.GetType());
-        if (elementType == null || !typeof(IRelationship).IsAssignableFrom(elementType))
-            return false;
-
-        // Try to determine the relationship label from the collection elements
-        var relationshipLabel = GetRelationshipLabel(enumerable, elementType);
-        if (relationshipLabel == null)
-            return false;
-
-        // Check the lambda argument: k => k.StartNodeId == p.Id or k => k.EndNodeId == p.Id
-        var lambdaArg = predicateExpr;
-        if (lambdaArg is UnaryExpression { NodeType: ExpressionType.Quote } quote)
-            lambdaArg = quote.Operand;
-        if (lambdaArg is not LambdaExpression lambda)
-            return false;
-
-        return IsCountByNodeIdPredicate(lambda.Body);
-    }
-
-    /// <summary>
-    /// Translates a closure-captured IEnumerable&lt;IRelationship&gt;.Count(lambda) expression
-    /// to a Cypher size() pattern.
-    /// </summary>
-    private string HandleClosureCountOnRelationship(MethodCallExpression node)
-    {
-        // Determine source expression based on instance vs static form
-        Expression sourceExpr;
-        Expression predicateExpr;
-        if (node.Object != null && node.Arguments.Count == 1)
-        {
-            sourceExpr = node.Object;
-            predicateExpr = node.Arguments[0];
-        }
-        else if (node.Object == null && node.Arguments.Count == 2)
-        {
-            sourceExpr = node.Arguments[0];
-            predicateExpr = node.Arguments[1];
-        }
-        else
-        {
-            throw new NotSupportedException("Expected Count with 1 or 2 arguments on a captured collection");
-        }
-
-        // Evaluate the captured collection to determine the relationship type label
-        var captureExpr = (MemberExpression)sourceExpr;
-        var evalLambda = Expression.Lambda<Func<object>>(Expression.Convert(captureExpr, typeof(object)));
-        var capturedValue = evalLambda.Compile()();
-        var enumerable = (System.Collections.IEnumerable)capturedValue;
-        var elementType = GetEnumerableElementType(capturedValue.GetType())!;
-        var relationshipLabel = GetRelationshipLabel(enumerable, elementType)!;
-
-        // Extract the direction from the lambda
-        var lambdaArg = predicateExpr;
-        if (lambdaArg is UnaryExpression { NodeType: ExpressionType.Quote } quote)
-            lambdaArg = quote.Operand;
-        var lambda = (LambdaExpression)lambdaArg;
-
-        var direction = DetectRelationshipDirection(lambda.Body);
-
-        // Determine the current source alias from the visitor context or use default
-        var sourceAlias = _sourceAlias ?? _alias ?? "src0";
-
-        // Generate the Cypher size() expression
-        string cypherPattern;
-        if (direction == RelationshipDirection.Outgoing)
-            cypherPattern = $"({sourceAlias})-[:{relationshipLabel}]->()";
-        else if (direction == RelationshipDirection.Incoming)
-            cypherPattern = $"({sourceAlias})<-[:{relationshipLabel}]-()";
-        else
-            cypherPattern = $"({sourceAlias})-[:{relationshipLabel}]-()";
-
-        _logger.LogDebug("Translated closure .Count() to Cypher size() pattern: {Pattern}", cypherPattern);
-        return $"size({cypherPattern})";
-    }
-
-    private enum RelationshipDirection { Outgoing, Incoming, Both }
-
-    private RelationshipDirection DetectRelationshipDirection(Expression predicateBody)
-    {
-        // Look for patterns: k.StartNodeId == p.Id (outgoing) or k.EndNodeId == p.Id (incoming)
-        // Or combined: k.StartNodeId == p.Id || k.EndNodeId == p.Id (both)
-        if (predicateBody is BinaryExpression binary && binary.NodeType == ExpressionType.OrElse)
-        {
-            // Check for combined: StartNodeId == p.Id || EndNodeId == p.Id
-            return RelationshipDirection.Both;
-        }
-
-        if (predicateBody is not BinaryExpression eq || eq.NodeType != ExpressionType.Equal)
-            return RelationshipDirection.Both; // Default to both if we can't determine
-
-        // Check left side: k.StartNodeId or k.EndNodeId
-        var isStartNodeId = IsMemberAccess(eq.Left, "StartNodeId") || IsMemberAccess(eq.Right, "StartNodeId");
-        var isEndNodeId = IsMemberAccess(eq.Left, "EndNodeId") || IsMemberAccess(eq.Right, "EndNodeId");
-
-        if (isStartNodeId) return RelationshipDirection.Outgoing;
-        if (isEndNodeId) return RelationshipDirection.Incoming;
-        return RelationshipDirection.Both;
-    }
-
-    private static bool IsMemberAccess(Expression expr, string memberName)
-    {
-        if (expr is MemberExpression mem)
-            return mem.Member.Name == memberName;
-        // Handle UnaryExpression wrapping (e.g., conversions)
-        if (expr is UnaryExpression unary && (unary.NodeType == ExpressionType.Convert || unary.NodeType == ExpressionType.ConvertChecked))
-            return IsMemberAccess(unary.Operand, memberName);
-        return false;
-    }
-
-    private static bool IsCountByNodeIdPredicate(Expression predicateBody)
-    {
-        // Simple check: is it an equality comparison involving StartNodeId or EndNodeId?
-        if (predicateBody is BinaryExpression binary)
-        {
-            if (binary.NodeType == ExpressionType.Equal)
-                return IsMemberAccess(binary.Left, "StartNodeId") || IsMemberAccess(binary.Left, "EndNodeId")
-                    || IsMemberAccess(binary.Right, "StartNodeId") || IsMemberAccess(binary.Right, "EndNodeId");
-            if (binary.NodeType == ExpressionType.OrElse)
-                return IsCountByNodeIdPredicate(binary.Left) && IsCountByNodeIdPredicate(binary.Right);
-        }
-        return false;
-    }
-
-    private static Type? GetEnumerableElementType(Type type)
-    {
-        if (type.IsGenericType)
-        {
-            var genDef = type.GetGenericTypeDefinition();
-            if (genDef == typeof(List<>) || genDef == typeof(IList<>) || genDef == typeof(IEnumerable<>))
-                return type.GetGenericArguments()[0];
-        }
-
-        foreach (var iface in type.GetInterfaces())
-        {
-            if (iface.IsGenericType && iface.GetGenericTypeDefinition() == typeof(IEnumerable<>))
-                return iface.GetGenericArguments()[0];
-        }
-
-        return null;
-    }
-
-    private static string? GetRelationshipLabel(System.Collections.IEnumerable enumerable, Type elementType)
-    {
-        // Try to get the label from the first element
-        foreach (var item in enumerable)
-        {
-            if (item == null) continue;
-
-            // Use the Labels utility to get the label from the type
-            try
-            {
-                return Labels.GetLabelFromType(elementType);
-            }
-            catch
-            {
-                // Fallback: derive from type name (remove "Relationship" suffix if present)
-            }
-
-            // Fallback: derive from type name
-            var name = elementType.Name;
-            if (name.EndsWith("Relationship", StringComparison.Ordinal))
-                name = name.Substring(0, name.Length - "Relationship".Length);
-            return name;
-        }
-
-        // Empty collection — derive from type name
-        var typeName = elementType.Name;
-        if (typeName.EndsWith("Relationship", StringComparison.Ordinal))
-            typeName = typeName.Substring(0, typeName.Length - "Relationship".Length);
-        return typeName;
     }
 
     /// <summary>
