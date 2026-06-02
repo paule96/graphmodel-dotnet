@@ -43,6 +43,7 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
     private readonly JoinHandler _joinHandler;
     private readonly SearchHandler _searchHandler;
     private readonly MaterializationHandler _materializationHandler;
+    private readonly QueryInitializationHandler _queryInitHandler;
     
     /// <summary>
     /// Defines the semantic position of a WHERE clause relative to path traversal operations.
@@ -68,21 +69,10 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         _projectionVisitor = new ProjectionFragmentVisitor(_context, _logger);
         _aggregationVisitor = new AggregationFragmentVisitor(_context, _logger);
         _joinHandler = new JoinHandler(_context, _logger, Visit, ExtractLambda);
-        _searchHandler = new SearchHandler(_context, _logger, Visit, SetupInitialMatch, EmitWhereFragment);
+        _queryInitHandler = new QueryInitializationHandler(_context, _logger, GetContextualAlias, EmitWhereFragment);
+        _searchHandler = new SearchHandler(_context, _logger, Visit, _queryInitHandler.SetupInitialMatch, EmitWhereFragment);
         _materializationHandler = new MaterializationHandler(
             _context, _logger, Visit, GetContextualAlias, EmitWhereFragment, ExtractLambda);
-    }
-
-    /// <summary>
-    /// Creates an expression visitor for translating expressions to Cypher.
-    /// </summary>
-    private AgeExpressionToCypherVisitor CreateExpressionVisitor()
-    {
-    // Keep parameter creation aligned with the active alias captured in the context
-        var alias = _context.Scope.CurrentAlias ?? GetContextualAlias();
-        _logger.LogDebug("CreateExpressionVisitor: Using alias '{Alias}' (CurrentAlias={CurrentAlias}, ContextualAlias={ContextualAlias})", 
-            alias, _context.Scope.CurrentAlias, GetContextualAlias());
-    return new AgeExpressionToCypherVisitor(_context, _logger, alias);
     }
 
     /// <summary>
@@ -525,7 +515,7 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
                 var elementType = node.Type.GetGenericArguments().FirstOrDefault();
                 if (elementType != null)
                 {
-                    SetupInitialMatch(elementType);
+                    _queryInitHandler.SetupInitialMatch(elementType);
                 }
             }
         }
@@ -543,107 +533,6 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         }
 
         return base.VisitExtension(node);
-    }
-
-    private void SetupInitialMatch(Type elementType)
-    {
-        // Skip setup if we already have path patterns (e.g., from PathSegments)
-        if (_context.HasMatchFragments())
-        {
-            _logger.LogDebug("Skipping initial match setup - match fragments already exist");
-            return;
-        }
-
-        if (typeof(INode).IsAssignableFrom(elementType))
-        {
-            // Node query: MATCH (n:BaseLabel) 
-            // For AGE inheritance support, always use base type label
-            var baseLabel = Labels.GetBaseTypeLabel(elementType);
-            var alias = _context.Scope.CurrentAlias ?? GetContextualAlias();
-            // Set CurrentAlias so subsequent operations (WHERE, SELECT, etc.) use the correct alias
-            _context.Scope.CurrentAlias = alias;
-            
-            // Emit MatchRootFragment for root node queries
-            var pattern = $"({alias}:{baseLabel})";
-            var fragment = new MatchRootFragment(pattern, baseLabel, elementType, ImmutableArray.Create(alias), alias);
-            _context.AddFragment(fragment);
-            _logger.LogDebug("Emitted MatchRootFragment for {Type} with alias {Alias}", elementType.Name, alias);
-            
-            // Add inheritance filter if querying for a derived type
-            var actualLabel = Labels.GetLabelFromType(elementType);
-            if (baseLabel != actualLabel)
-            {
-                // Add WHERE clause to filter by inheritance hierarchy
-                var inheritanceFilter = $"{alias}.inheritance_labels[0] = '{actualLabel}'";
-                EmitWhereFragment(inheritanceFilter, alias, ImmutableArray.Create(alias));
-                _logger.LogDebug("Emitted inheritance filter: {Filter}", inheritanceFilter);
-            }
-            
-            // Set up complex properties for node types
-            SetupComplexProperties(elementType, alias);
-            
-            _logger.LogDebug("Set up node match for type {Type} with base label {BaseLabel}", elementType.Name, baseLabel);
-        }
-        else if (typeof(IRelationship).IsAssignableFrom(elementType))
-        {
-            var alias = _context.Scope.CurrentAlias ?? _context.Scope.GetNumberedAlias("r");
-            var srcAlias = _context.Scope.GetNumberedAlias("src");
-            var tgtAlias = _context.Scope.GetNumberedAlias("tgt");
-            var relationshipLabel = GetRelationshipLabel(elementType);
-            var relationshipPattern = string.IsNullOrEmpty(relationshipLabel)
-                ? alias
-                : $"{alias}:{relationshipLabel}";
-            var pattern = $"({srcAlias})-[{relationshipPattern}]->({tgtAlias})";
-            // Set CurrentAlias so subsequent operations use the correct alias
-            _context.Scope.CurrentAlias = alias;
-            
-            // Emit MatchRootFragment for root relationship queries
-            var fragment = new MatchRootFragment(pattern, relationshipLabel, elementType, ImmutableArray.Create(srcAlias, alias, tgtAlias), alias);
-            _context.AddFragment(fragment);
-            _logger.LogDebug("Emitted MatchRootFragment for {Type} with alias {Alias}", elementType.Name, alias);
-            
-            AddRelationshipTypeFilter(elementType, alias);
-
-            var labelForLog = string.IsNullOrEmpty(relationshipLabel) ? "*" : relationshipLabel;
-            _logger.LogDebug("Set up relationship match for type {Type} with label {Label} using aliases: {SrcAlias}-[{RelAlias}]->{TgtAlias}", 
-                elementType.Name, labelForLog, srcAlias, alias, tgtAlias);
-        }
-        else
-        {
-            throw new NotSupportedException($"Query type {elementType.Name} is not supported. Only INode and IRelationship types are supported.");
-        }
-    }
-
-    private void SetupComplexProperties(Type nodeType, string alias)
-    {
-        var complexProps = GetComplexProperties(nodeType);
-        if (complexProps.Count == 0) return;
-
-        _logger.LogDebug("Setting up {Count} complex properties for {Type}", complexProps.Count, nodeType.Name);
-
-        foreach (var prop in complexProps)
-        {
-            var relType = GraphDataModel.PropertyNameToRelationshipTypeName(prop.Name);
-            var optionalMatch = $"OPTIONAL MATCH ({alias})-[r_{prop.Name}:{relType}]->(cp_{prop.Name})";
-            var optionalFragment = new OptionalMatchFragment(
-                optionalMatch,
-                ImmutableArray.Create($"r_{prop.Name}", $"cp_{prop.Name}"),
-                ImmutableArray.Create(alias),
-                alias);
-            _context.AddFragment(optionalFragment);
-            _logger.LogDebug("Emitted optional match fragment for complex property '{Property}': {Match}", prop.Name, optionalMatch);
-        }
-    }
-
-    private static LambdaExpression? ExtractLambda(Expression expression)
-    {
-        // Handle quoted lambda expressions
-        if (expression is UnaryExpression { NodeType: ExpressionType.Quote } quote)
-        {
-            expression = quote.Operand;
-        }
-
-        return expression as LambdaExpression;
     }
 
     private static T EvaluateConstantExpression<T>(Expression expression)
@@ -666,74 +555,15 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         }
     }
 
-    private static List<System.Reflection.PropertyInfo> GetComplexProperties(Type type)
+    private static LambdaExpression? ExtractLambda(Expression expression)
     {
-        return type.GetProperties()
-            .Where(p => typeof(INode).IsAssignableFrom(p.PropertyType) ||
-                       typeof(IRelationship).IsAssignableFrom(p.PropertyType) ||
-                       (p.PropertyType.IsGenericType &&
-                        p.PropertyType.GetGenericTypeDefinition() == typeof(ICollection<>) &&
-                        (typeof(INode).IsAssignableFrom(p.PropertyType.GetGenericArguments()[0]) ||
-                         typeof(IRelationship).IsAssignableFrom(p.PropertyType.GetGenericArguments()[0]))))
-            .ToList();
-    }
-
-    /// <summary>
-    /// Gets the appropriate relationship label for Cypher queries.
-    /// For interface types, returns empty string (no type filtering in pattern - will use WHERE clause instead).
-    /// For concrete types, returns the base type label.
-    /// </summary>
-    /// <param name="relationshipType">The relationship type</param>
-    /// <returns>A Cypher-compatible relationship type pattern</returns>
-    private string GetRelationshipLabel(Type relationshipType)
-    {
-        if (IsUnspecifiedRelationshipType(relationshipType))
+        // Handle quoted lambda expressions
+        if (expression is UnaryExpression { NodeType: ExpressionType.Quote } quote)
         {
-            _logger.LogDebug("Relationship type {TypeName} requests unspecified pattern", relationshipType.Name);
-            return string.Empty;
+            expression = quote.Operand;
         }
 
-        // For interface types, we don't specify the type in the pattern
-        // Instead, we'll add a WHERE clause later to filter by inheritance_labels property
-        if (relationshipType.IsInterface)
-        {
-            var interfaceLabel = Labels.GetLabelFromType(relationshipType);
-            _logger.LogDebug("Interface relationship type {TypeName} mapped to label: {Label}", 
-                relationshipType.Name, interfaceLabel);
-            
-            // Store the interface label for later use in WHERE clause
-            // We'll use the more efficient inheritance_labels property approach
-            return "";
-        }
-        
-        // For concrete types, use the base type label
-        return Labels.GetBaseTypeLabel(relationshipType);
-    }
-
-    /// <summary>
-    /// Adds a WHERE clause to filter relationships by type when dealing with interface types.
-    /// </summary>
-    /// <param name="relationshipType">The relationship type</param>
-    /// <param name="relationshipAlias">The alias used for the relationship in the query</param>
-    private void AddRelationshipTypeFilter(Type relationshipType, string relationshipAlias)
-    {
-        if (!relationshipType.IsInterface || IsUnspecifiedRelationshipType(relationshipType))
-        {
-            return;
-        }
-
-        var interfaceLabel = Labels.GetLabelFromType(relationshipType);
-
-        // Use standard Cypher IN syntax for AGE compatibility
-        // Generate: WHERE 'IRelationship' IN r0.inheritance_labels
-        var whereClause = $"'{interfaceLabel}' IN {relationshipAlias}.inheritance_labels";
-    EmitWhereFragment(whereClause, relationshipAlias, ImmutableArray.Create(relationshipAlias));
-    _logger.LogDebug("Emitted inheritance-based relationship filter: {WhereClause}", whereClause);
-    }
-
-    private static bool IsUnspecifiedRelationshipType(Type relationshipType)
-    {
-        return relationshipType == typeof(IRelationship) || relationshipType == typeof(Relationship);
+        return expression as LambdaExpression;
     }
 
     private Expression HandlePathSegments(MethodCallExpression node)
