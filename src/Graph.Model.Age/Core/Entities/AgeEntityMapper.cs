@@ -20,6 +20,7 @@ using Cvoya.Graph.Model;
 using Cvoya.Graph.Model.Serialization;
 using Microsoft.Extensions.Logging;
 using Npgsql.Age.Types;
+using static Cvoya.Graph.Model.Age.Core.Entities.LabelsExtractor;
 
 /// <summary>
 /// Converts AGE vertices/edges back into EntityInfo structures for deserialization.
@@ -307,71 +308,8 @@ internal sealed class AgeEntityMapper
         };
     }
 
-    private static IReadOnlyList<string> ExtractLabels(Vertex vertex)
-    {
-        // For AGE inheritance support, check for inheritance_labels property first
-        if (vertex.Properties.TryGetValue("inheritance_labels", out var inheritanceValue))
-        {
-            return inheritanceValue switch
-            {
-                string[] stringArray => stringArray.ToList(),
-                IList<object?> list => list.Select(v => v?.ToString() ?? string.Empty).Where(static v => !string.IsNullOrWhiteSpace(v)).ToList(),
-                IEnumerable<string> stringList => stringList.ToList(),
-                _ => []
-            };
-        }
-
-        // Fallback to standard Labels property
-        if (vertex.Properties.TryGetValue(nameof(INode.Labels), out var value))
-        {
-            return value switch
-            {
-                IList<object?> list => list.Select(v => v?.ToString() ?? string.Empty).Where(static v => !string.IsNullOrWhiteSpace(v)).ToList(),
-                IEnumerable<string> stringList => stringList.ToList(),
-                _ => []
-            };
-        }
-
-        // Final fallback to vertex label
-        if (!string.IsNullOrEmpty(vertex.Label))
-        {
-            return vertex.Label.Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        }
-
-        return [];
-    }
-
-    private static IReadOnlyList<string> ExtractLabels(Edge edge)
-    {
-        // For AGE inheritance support, check for inheritance_labels property first
-        if (edge.Properties.TryGetValue("inheritance_labels", out var inheritanceValue))
-        {
-            return inheritanceValue switch
-            {
-                string[] stringArray => stringArray.ToList(),
-                IList<object?> list => list.Select(v => v?.ToString() ?? string.Empty).Where(static v => !string.IsNullOrWhiteSpace(v)).ToList(),
-                IEnumerable<string> stringList => stringList.ToList(),
-                _ => []
-            };
-        }
-
-        // Fallback to standard Labels property
-        if (edge.Properties.TryGetValue(nameof(INode.Labels), out var value))
-        {
-            return value switch
-            {
-                IList<object?> list => list.Select(v => v?.ToString() ?? string.Empty).Where(static v => !string.IsNullOrWhiteSpace(v)).ToList(),
-                IEnumerable<string> stringList => stringList.ToList(),
-                _ => []
-            };
-        }
-
-        // Final fallback to edge label
-        var labels = new List<string>();
-        if (!string.IsNullOrWhiteSpace(edge.Label))
-            labels.Add(edge.Label);
-        return labels;
-    }
+    // ExtractLabels(Vertex) and ExtractLabels(Edge) moved to LabelsExtractor
+    // and imported via `using static LabelsExtractor`.
 
     private static object? NormalizeValue(object? rawValue)
     {
