@@ -7,7 +7,6 @@ using System.Linq.Expressions;
 using Cvoya.Graph.Model;
 using Cvoya.Graph.Model.Cypher.Querying.Cypher.Visitors.Core;
 using Microsoft.Extensions.Logging;
-using static Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core.ExpressionTranslationHelper;
 
 /// <summary>
 /// Specialized visitor for handling projection operations (Select).

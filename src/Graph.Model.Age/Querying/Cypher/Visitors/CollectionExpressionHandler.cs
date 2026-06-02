@@ -15,7 +15,6 @@
 namespace Cvoya.Graph.Model.Age.Querying.Cypher.Visitors;
 
 using System;
-using System.Linq;
 using System.Linq.Expressions;
 using Microsoft.Extensions.Logging;
 

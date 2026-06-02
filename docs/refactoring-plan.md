@@ -468,3 +468,52 @@ If a refactoring step causes test failures:
 ### Documentation
 - `docs/age-fulltext-search-limitations.md` (AGE FTS limitations)
 - `docs/pattern-comprehension-limitations.md` (Pattern comprehension limitations)
+- `docs/unused-parameters.md` (Unused parameter analysis)
+- `docs/test-coverage-analysis.md` (Coverage gap analysis)
+
+---
+
+## 9. Cleanup: Unused Parameters Audit
+
+After the refactoring extraction work, several methods inherited parameters that are no longer needed. A dedicated analysis was performed in [`docs/unused-parameters.md`](unused-parameters.md).
+
+### Findings Summary
+
+| Tier | Action Items | Priority |
+|------|-------------|----------|
+| **Tier 1** | `EmitFragment(fragmentType)` — remove unused param | Quick win |
+| **Tier 1** | `SearchHandler.IsIncludedInFullTextSearch(entityType, ...)` — remove `entityType` | Quick win |
+| **Tier 1** | `MemberExpressionHandler` constructor `context` — remove if unused | Quick win |
+| **Tier 2** | `NestedCollectHandler.TryHandleNestedCollect(..., propertyName, ...)` — only used in logging | Review after logging |
+| **Tier 2** | `TraversalFragmentVisitor.BuildMatchPattern(type params)` — verify logging use | Review |
+
+### Recommended Workflow
+1. Remove Tier 1 unused parameters (build → test → commit per change)
+2. Review Tier 2 for logging value; remove if logging is trimmed
+3. Check for cascading unused parameters in callers after removal
+
+---
+
+## 10. Test Coverage Improvement Plan
+
+Detailed analysis in [`docs/test-coverage-analysis.md`](test-coverage-analysis.md).
+
+### Coverage by Priority
+
+| Priority | Area | Current Coverage | Target | Effort |
+|----------|------|-----------------|--------|--------|
+| **P1** | `GraphSearchHelper` | 0% | 80%+ | Low — simple delegate methods |
+| **P1** | `EntityInfoBuilder` | 0% | 80%+ | Medium — JSON conversion edge cases |
+| **P1** | `AgeValueConverters` | 0% | 80%+ | Medium — value type conversions |
+| **P2** | `CollectExpressionTranslator` | 48% | 75%+ | High — many expression variants |
+| **P2** | `AgeExpressionToCypherVisitor` | 55% | 75%+ | High — expression visitor paths |
+| **P2** | `ClosureCaptureHandler` | 68% | 85%+ | Medium — closure detection |
+| **P3** | `DateTimeMethodHandler` | 53% | 80%+ | Low — date format edge cases |
+| **P3** | `MathMethodHandler` | 60% | 80%+ | Low — math variants |
+| **P3** | `AgeGraph.cs` | 67% | 85%+ | Medium — transaction cleanup |
+
+### Files with 0% Coverage (Untested)
+- `AgeGraphQueryProvider.cs`, `AgeGraphNodeQueryable.cs`, `AgeGraphRelationshipQueryable.cs` — thin LINQ wrappers, low risk
+- `GraphSearchHelper.cs` — extracted from AgeGraph, **should be tested**
+- `EntityInfoBuilder.cs` — JSON/collection conversion, **should be tested**
+- `AgeValueConverters.cs` — value type conversion, **should be tested**

@@ -2,7 +2,6 @@
 
 namespace Cvoya.Graph.Model.Age.Querying.Cypher.Execution;
 
-using System.Collections;
 using Cvoya.Graph.Model.Serialization;
 
 /// <summary>

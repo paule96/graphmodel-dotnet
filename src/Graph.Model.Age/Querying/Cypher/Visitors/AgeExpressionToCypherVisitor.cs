@@ -16,12 +16,9 @@ namespace Cvoya.Graph.Model.Age.Querying.Cypher.Visitors;
 
 using System.Collections.Generic;
 using System.Linq.Expressions;
-using Cvoya.Graph.Model.Age.Core.Entities;
 using Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core;
-using Cvoya.Graph.Model.Cypher.Querying.Cypher.Visitors.Core;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
-using static Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core.ExpressionTranslationHelper;
 
 /// <summary>
 /// Translates .NET LINQ expressions to Cypher expressions for AGE.

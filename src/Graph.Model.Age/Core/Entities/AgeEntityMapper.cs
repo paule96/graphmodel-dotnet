@@ -126,7 +126,6 @@ internal sealed class AgeEntityMapper
                 var entityInfo = EntityInfoBuilder.CreateEntityInfoFromDictionary(dict, csharpPropertyName);
                 complexProperties[csharpPropertyName] = new Property(null!, csharpPropertyName, false, entityInfo);
                 continue;
-                continue;
             }
             else if (convertedValue is IList<object?> list)
             {

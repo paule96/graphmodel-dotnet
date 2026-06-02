@@ -19,7 +19,6 @@ using Cvoya.Graph.Model.Serialization;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using Npgsql.Age.Types;
-using static Cvoya.Graph.Model.Age.Core.Entities.AgeValueConverters;
 
 /// <summary>
 /// Age-specific result processor. Delegates multi-column row reading to EntityResultReader.

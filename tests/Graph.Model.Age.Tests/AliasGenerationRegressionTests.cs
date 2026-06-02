@@ -2,12 +2,10 @@
 
 namespace Cvoya.Graph.Model.Age.Tests;
 
-using System;
 using System.Linq;
 using Cvoya.Graph.Model;
 using Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core;
 using Cvoya.Graph.Model.Age.Tests.Infrastructure;
-using Cvoya.Graph.Model.Cypher.Querying.Cypher.Visitors.Core;
 using Xunit;
 
 /// <summary>

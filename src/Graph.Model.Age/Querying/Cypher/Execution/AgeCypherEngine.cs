@@ -18,19 +18,16 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Cvoya.Graph.Model.Age.Core;
 using Cvoya.Graph.Model.Age.Core.Entities;
-using Cvoya.Graph.Model.Age.Querying.Cypher.Visitors;
 using Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core;
 using Cvoya.Graph.Model.Serialization;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Npgsql.Age;
-using Npgsql.Age.Types;
 
 /// <summary>
 /// Executes LINQ queries against AGE by converting them to Cypher.

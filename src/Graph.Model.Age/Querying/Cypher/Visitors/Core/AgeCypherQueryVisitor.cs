@@ -14,7 +14,6 @@
 
 namespace Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core;
 
-using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq.Expressions;
 using Cvoya.Graph.Model;

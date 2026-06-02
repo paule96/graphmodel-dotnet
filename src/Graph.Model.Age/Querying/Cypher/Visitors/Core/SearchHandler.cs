@@ -19,7 +19,6 @@ using System.Collections.Immutable;
 using System.Linq;
 using System.Linq.Expressions;
 using Cvoya.Graph.Model.Age.Querying.Linq.Queryables;
-using Cvoya.Graph.Model.Cypher.Querying.Cypher.Visitors.Core;
 using Microsoft.Extensions.Logging;
 
 /// <summary>

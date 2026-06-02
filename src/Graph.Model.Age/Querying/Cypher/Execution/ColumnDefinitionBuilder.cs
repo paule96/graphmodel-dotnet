@@ -14,14 +14,12 @@
 
 namespace Cvoya.Graph.Model.Age.Querying.Cypher.Execution;
 
-using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
 using Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core;
 using Npgsql;
-using Npgsql.Age;
 using Npgsql.Age.Types;
 
 /// <summary>

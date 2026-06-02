@@ -1,7 +1,6 @@
 ﻿namespace SimpleMovieExample;
 
 using Cvoya.Graph.Model;
-using Cvoya.Graph.Model.Age.Core;
 using Cvoya.Graph.Model.Neo4j;
 using Microsoft.Extensions.Hosting;
 using Neo4j.Driver;

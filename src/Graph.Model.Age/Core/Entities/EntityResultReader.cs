@@ -14,7 +14,6 @@
 
 namespace Cvoya.Graph.Model.Age.Core.Entities;
 
-using System.Linq.Expressions;
 using Cvoya.Graph.Model.Serialization;
 using Microsoft.Extensions.Logging;
 using Npgsql;

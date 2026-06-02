@@ -17,10 +17,8 @@ namespace Cvoya.Graph.Model.Age.Querying.Cypher.Visitors;
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Linq;
 using System.Linq.Expressions;
 using Cvoya.Graph.Model;
-using Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core;
 using Microsoft.Extensions.Logging;
 
 /// <summary>

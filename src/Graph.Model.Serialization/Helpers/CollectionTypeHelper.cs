@@ -13,9 +13,6 @@
 // limitations under the License.
 
 namespace Cvoya.Graph.Model.Serialization;
-
-using System.Collections;
-
 /// <summary>
 /// Utility class for collection type analysis and manipulation.
 /// </summary>

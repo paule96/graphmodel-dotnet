@@ -16,7 +16,6 @@ namespace Cvoya.Graph.Model.Age.Core.Entities;
 
 using System.Text.Json;
 using Cvoya.Graph.Model;
-using Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core;
 using Cvoya.Graph.Model.Serialization;
 
 /// <summary>

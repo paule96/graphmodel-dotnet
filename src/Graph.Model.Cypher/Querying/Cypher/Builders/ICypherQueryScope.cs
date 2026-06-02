@@ -13,9 +13,6 @@
 // limitations under the License.
 
 namespace Cvoya.Graph.Model.Cypher.Querying.Cypher.Builders;
-
-using Microsoft.Extensions.Logging;
-
 /// <summary>
 /// Abstraction for query scope management used by the CypherQueryBuilder.
 /// This allows different providers to implement their own scope tracking logic.

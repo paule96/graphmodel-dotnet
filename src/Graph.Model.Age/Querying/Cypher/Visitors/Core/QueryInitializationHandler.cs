@@ -20,7 +20,6 @@ using System.Collections.Immutable;
 using System.Linq;
 using System.Reflection;
 using Cvoya.Graph.Model;
-using Cvoya.Graph.Model.Cypher.Querying.Cypher.Visitors.Core;
 using Microsoft.Extensions.Logging;
 
 /// <summary>

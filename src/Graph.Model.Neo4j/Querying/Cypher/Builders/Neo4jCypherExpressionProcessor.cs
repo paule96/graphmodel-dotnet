@@ -17,10 +17,7 @@ namespace Cvoya.Graph.Model.Neo4j.Querying.Cypher.Builders;
 using System.Linq.Expressions;
 using Cvoya.Graph.Model;
 using Cvoya.Graph.Model.Cypher.Querying.Cypher.Builders;
-using Cvoya.Graph.Model.Neo4j.Querying.Cypher.Visitors;
-using Cvoya.Graph.Model.Neo4j.Querying.Cypher.Visitors.Core;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
 
 /// <summary>
 /// Neo4j-specific implementation of ICypherExpressionProcessor that supports APOC functions.

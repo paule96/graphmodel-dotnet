@@ -5,7 +5,6 @@ namespace Cvoya.Graph.Model.Age.Querying.Cypher.Visitors.Core.Modular;
 using System.Collections.Immutable;
 using System.Linq.Expressions;
 using Cvoya.Graph.Model;
-using Cvoya.Graph.Model.Cypher.Querying.Cypher.Visitors.Core;
 using Microsoft.Extensions.Logging;
 
 /// <summary>
