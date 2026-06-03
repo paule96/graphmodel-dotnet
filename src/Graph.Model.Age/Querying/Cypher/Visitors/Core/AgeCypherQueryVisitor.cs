@@ -69,21 +69,23 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
     {
         _logger.LogDebug("Processing LINQ method: {Method}", node.Method.Name);
 
-        // Route LINQ methods to specific handlers
+        // Route LINQ methods to specific handlers using a single dispatch helper.
+        // This eliminates 16 repetitive Handle* methods that all followed the pattern:
+        //   Visit(node.Arguments[0]); handler.HandleXxx(node); return node;
         return node.Method.Name switch
         {
             // Core LINQ methods
-            "Where" => HandleWhere(node),
-            "Select" => HandleSelect(node),
-            "GroupBy" => HandleGroupBy(node),
+            "Where" => VisitThen(node, n => _filteringVisitor.HandleWhere(n)),
+            "Select" => VisitThenSelect(node),
+            "GroupBy" => VisitThen(node, n => _projectionVisitor.HandleGroupBy(n)),
             "Join" => _joinHandler.HandleJoin(node),
-            "OrderBy" => HandleOrderBy(node, descending: false),
-            "OrderByDescending" => HandleOrderBy(node, descending: true),
-            "ThenBy" => HandleThenBy(node, descending: false),
-            "ThenByDescending" => HandleThenBy(node, descending: true),
-            "Take" => HandleTake(node),
-            "Skip" => HandleSkip(node),
-            "Distinct" => HandleDistinct(node),
+            "OrderBy" => VisitThen(node, n => _filteringVisitor.HandleOrderBy(n, descending: false, isThenBy: false)),
+            "OrderByDescending" => VisitThen(node, n => _filteringVisitor.HandleOrderBy(n, descending: true, isThenBy: false)),
+            "ThenBy" => VisitThen(node, n => _filteringVisitor.HandleOrderBy(n, descending: false, isThenBy: true)),
+            "ThenByDescending" => VisitThen(node, n => _filteringVisitor.HandleOrderBy(n, descending: true, isThenBy: true)),
+            "Take" => VisitThen(node, n => _filteringVisitor.HandleTake(n)),
+            "Skip" => VisitThen(node, n => _filteringVisitor.HandleSkip(n)),
+            "Distinct" => VisitThen(node, n => _filteringVisitor.HandleDistinct(n)),
 
             // Graph traversal methods
             "PathSegments" => _pathSegmentHandler.HandlePathSegments(node),
@@ -94,14 +96,14 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
             "Search" => _searchHandler.HandleSearch(node),
 
             // Aggregation methods
-            "Count" or "CountAsync" or "CountAsyncMarker" => HandleCount(node),
-            "LongCount" or "LongCountAsync" or "LongCountAsyncMarker" => HandleCount(node),
-            "Any" or "AnyAsync" or "AnyAsyncMarker" => HandleAny(node),
-            "All" or "AllAsync" or "AllAsyncMarker" => HandleAll(node),
-            "Sum" or "SumAsync" or "SumAsyncMarker" => HandleSum(node),
-            "Average" or "AverageAsync" or "AverageAsyncMarker" => HandleAverage(node),
-            "Min" or "MinAsync" or "MinAsyncMarker" => HandleMin(node),
-            "Max" or "MaxAsync" or "MaxAsyncMarker" => HandleMax(node),
+            "Count" or "CountAsync" or "CountAsyncMarker" => VisitThen(node, n => _aggregationVisitor.HandleCount(n)),
+            "LongCount" or "LongCountAsync" or "LongCountAsyncMarker" => VisitThen(node, n => _aggregationVisitor.HandleCount(n)),
+            "Any" or "AnyAsync" or "AnyAsyncMarker" => VisitThen(node, n => _aggregationVisitor.HandleAny(n)),
+            "All" or "AllAsync" or "AllAsyncMarker" => VisitThen(node, n => _aggregationVisitor.HandleAll(n)),
+            "Sum" or "SumAsync" or "SumAsyncMarker" => VisitThen(node, n => _aggregationVisitor.HandleAggregationFunction(n, "SUM")),
+            "Average" or "AverageAsync" or "AverageAsyncMarker" => VisitThen(node, n => _aggregationVisitor.HandleAggregationFunction(n, "AVG")),
+            "Min" or "MinAsync" or "MinAsyncMarker" => VisitThen(node, n => _aggregationVisitor.HandleAggregationFunction(n, "MIN")),
+            "Max" or "MaxAsync" or "MaxAsyncMarker" => VisitThen(node, n => _aggregationVisitor.HandleAggregationFunction(n, "MAX")),
 
             // Element access methods
             "First" or "FirstAsync" or "FirstAsyncMarker" => _materializationHandler.HandleFirst(node),
@@ -120,182 +122,31 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
         };
     }
 
-    private Expression HandleWhere(MethodCallExpression node)
+    /// <summary>
+    /// Visits the source expression first, then delegates to the handler action.
+    /// This replaces 16 repetitive Handle* methods with a single dispatch pattern.
+    /// </summary>
+    private Expression VisitThen(MethodCallExpression node, Action<MethodCallExpression> handler)
     {
-        // Visit the source expression FIRST to ensure full traversal (e.g., SetupInitialMatch for root queries)
-        // This sets CurrentAlias which is needed by FilteringFragmentVisitor
         Visit(node.Arguments[0]);
-        
-        // Then delegate to specialized filtering visitor which handles WHERE clauses and emits fragments
-        _filteringVisitor.HandleWhere(node);
-        
+        handler(node);
         return node;
     }
 
-    private Expression HandleSelect(MethodCallExpression node)
+    /// <summary>
+    /// Special handling for Select: visits source, delegates projection, then disables complex property loading.
+    /// </summary>
+    private Expression VisitThenSelect(MethodCallExpression node)
     {
-        // Visit the source expression FIRST to set up MATCH patterns and increment hop counter
         Visit(node.Arguments[0]);
-        
-        // Then delegate projection handling to specialized visitor which emits ProjectionFragment
         _projectionVisitor.HandleSelect(node);
-        
-    // For projections, disable complex property loading and emit toggle fragment
-    var complexPropertyFragment = new ComplexPropertyLoadingFragment(false, _context.Scope.CurrentAlias);
-    _context.AddFragment(complexPropertyFragment);
+        var complexPropertyFragment = new ComplexPropertyLoadingFragment(false, _context.Scope.CurrentAlias);
+        _context.AddFragment(complexPropertyFragment);
         _logger.LogDebug("Emitted ComplexPropertyLoadingFragment (disabled)");
-        
         return node;
     }
 
-    private Expression HandleGroupBy(MethodCallExpression node)
-    {
-        // Visit source FIRST to ensure the MATCH pattern is generated (proper visitor pattern: children before parent)
-        Visit(node.Arguments[0]);
-        
-        // Then delegate to specialized projection visitor which handles GroupBy and emits fragments
-        _projectionVisitor.HandleGroupBy(node);
-        
-        return node;
-    }
-
-    // HandleJoin moved to JoinHandler. Dispatch: _joinHandler.HandleJoin(node)
-
-    private Expression HandleOrderBy(MethodCallExpression node, bool descending)
-    {
-        // Visit source FIRST to ensure CurrentAlias is set (proper visitor pattern: children before parent)
-        Visit(node.Arguments[0]);
-        
-        // Then delegate to specialized filtering visitor which handles ordering and emits fragments
-        _filteringVisitor.HandleOrderBy(node, descending, isThenBy: false);
-        
-        return node;
-    }
-
-    private Expression HandleThenBy(MethodCallExpression node, bool descending)
-    {
-        // Visit source FIRST to ensure CurrentAlias is set
-        Visit(node.Arguments[0]);
-        
-        // Then delegate to specialized filtering visitor (ThenBy is just additional ordering)
-        _filteringVisitor.HandleOrderBy(node, descending, isThenBy: true);
-        
-        return node;
-    }
-
-    private Expression HandleTake(MethodCallExpression node)
-    {
-        // Visit source FIRST to ensure CurrentAlias is set
-        Visit(node.Arguments[0]);
-        
-        // Then delegate to specialized filtering visitor for pagination
-        _filteringVisitor.HandleTake(node);
-        
-        return node;
-    }
-
-    private Expression HandleSkip(MethodCallExpression node)
-    {
-        // Visit source FIRST to ensure CurrentAlias is set
-        Visit(node.Arguments[0]);
-        
-        // Then delegate to specialized filtering visitor for pagination
-        _filteringVisitor.HandleSkip(node);
-        
-        return node;
-    }
-
-    private Expression HandleDistinct(MethodCallExpression node)
-    {
-        // Visit source FIRST to ensure CurrentAlias is set
-        Visit(node.Arguments[0]);
-        
-        // Then delegate to specialized filtering visitor for distinctness
-        _filteringVisitor.HandleDistinct(node);
-        
-        return node;
-    }
-
-    private Expression HandleCount(MethodCallExpression node)
-    {
-        // Visit source FIRST to ensure CurrentAlias is set
-        Visit(node.Arguments[0]);
-        
-        // Then delegate to specialized aggregation visitor
-        _aggregationVisitor.HandleCount(node);
-        
-        return node;
-    }
-
-    private Expression HandleAny(MethodCallExpression node)
-    {
-        // Visit source FIRST to ensure CurrentAlias is set
-        Visit(node.Arguments[0]);
-        
-        // Then delegate to specialized aggregation visitor
-        _aggregationVisitor.HandleAny(node);
-        
-        return node;
-    }
-
-    private Expression HandleAll(MethodCallExpression node)
-    {
-        // Visit source FIRST to ensure CurrentAlias is set
-        Visit(node.Arguments[0]);
-        
-        // Then delegate to specialized aggregation visitor
-        _aggregationVisitor.HandleAll(node);
-        
-        return node;
-    }
-
-    private Expression HandleSum(MethodCallExpression node)
-    {
-        // Visit source FIRST to ensure CurrentAlias is set
-        Visit(node.Arguments[0]);
-        
-        // Then delegate to specialized aggregation visitor
-        _aggregationVisitor.HandleAggregationFunction(node, "SUM");
-        
-        return node;
-    }
-
-    private Expression HandleAverage(MethodCallExpression node)
-    {
-        // Visit source FIRST to ensure CurrentAlias is set
-        Visit(node.Arguments[0]);
-        
-        // Then delegate to specialized aggregation visitor
-        _aggregationVisitor.HandleAggregationFunction(node, "AVG");
-        
-        return node;
-    }
-
-    private Expression HandleMin(MethodCallExpression node)
-    {
-        // Visit source FIRST to ensure CurrentAlias is set
-        Visit(node.Arguments[0]);
-        
-        // Then delegate to specialized aggregation visitor
-        _aggregationVisitor.HandleAggregationFunction(node, "MIN");
-        
-        return node;
-    }
-
-    private Expression HandleMax(MethodCallExpression node)
-    {
-        // Visit source FIRST to ensure CurrentAlias is set
-        Visit(node.Arguments[0]);
-        
-        // Then delegate to specialized aggregation visitor
-        _aggregationVisitor.HandleAggregationFunction(node, "MAX");
-        
-        return node;
-    }
-
-
-
-    private void EmitWhereFragment(string predicate, string? alias = null, ImmutableArray<string> consumedAliases = default)
+    private void EmitWhereFragment(string predicate, string? alias, ImmutableArray<string> consumedAliases)
     {
         if (string.IsNullOrWhiteSpace(predicate))
         {

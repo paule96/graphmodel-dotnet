@@ -88,37 +88,12 @@ internal sealed class AgeEntityMapper
             }
 
             // Handle JSON string that contains a serialized complex collection.
-            // When a List<Dictionary<string, object?>> is stored in AGE, it comes
-            // back as a string. The format may be:
-            //   - A proper JSON array: "[{...},{...}]" (from our JsonSerializer change)
-            //   - Concatenated objects: "{...},{...}" (AGE's internal representation)
-            // Parse it back into a List<IDictionary<string, object?>> for the
-            // EntityCollection code path below.
-            if (convertedValue is string strVal && strVal.Length >= 2 && (strVal[0] == '[' || strVal[0] == '{'))
+            var parsedCollection = TryParseJsonCollection(convertedValue, csharpPropertyName);
+            if (parsedCollection is IList<object?> parsedItems && parsedItems != convertedValue)
             {
-                var jsonToParse = strVal[0] == '[' ? strVal : $"[{strVal}]";
-                try
-                {
-                    using var doc = JsonDocument.Parse(jsonToParse);
-                    if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0
-                        && doc.RootElement[0].ValueKind == JsonValueKind.Object)
-                    {
-                        var parsedItems = doc.RootElement.EnumerateArray()
-                            .Select(e => (object)EntityInfoBuilder.ConvertJsonElementToDictionary(e))
-                            .Where(static item => item is IDictionary<string, object?>)
-                            .ToList();
-                        if (parsedItems.Count > 0)
-                        {
-                            convertedValue = parsedItems;
-                            _logger.LogDebug("MapVertex: Parsed JSON collection for property '{Prop}' with {Count} items",
-                                csharpPropertyName, parsedItems.Count);
-                        }
-                    }
-                }
-                catch
-                {
-                    // Not valid JSON — treat as a regular string
-                }
+                _logger.LogDebug("MapVertex: Parsed JSON collection for property '{Prop}' with {Count} items",
+                    csharpPropertyName, parsedItems.Count);
+                convertedValue = parsedCollection;
             }
 
             if (convertedValue is IDictionary<string, object?> dict && !GraphDataModel.IsSimple(dict.GetType()))
@@ -239,6 +214,40 @@ internal sealed class AgeEntityMapper
         };
     }
 
+    /// <summary>
+    /// Attempts to parse a string value as a JSON serialized complex collection.
+    /// Handles both proper JSON arrays and AGE's concatenated-object format.
+    /// Returns the parsed list or the original value if parsing fails.
+    /// </summary>
+    private static object? TryParseJsonCollection(object? value, string propertyName)
+    {
+        if (value is string strVal && strVal.Length >= 2 && (strVal[0] == '[' || strVal[0] == '{'))
+        {
+            var jsonToParse = strVal[0] == '[' ? strVal : $"[{strVal}]";
+            try
+            {
+                using var doc = JsonDocument.Parse(jsonToParse);
+                if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0
+                    && doc.RootElement[0].ValueKind == JsonValueKind.Object)
+                {
+                    var parsedItems = doc.RootElement.EnumerateArray()
+                        .Select(e => (object)EntityInfoBuilder.ConvertJsonElementToDictionary(e))
+                        .Where(static item => item is IDictionary<string, object?>)
+                        .ToList();
+                    if (parsedItems.Count > 0)
+                    {
+                        return parsedItems;
+                    }
+                }
+            }
+            catch
+            {
+                // Not valid JSON — treat as a regular string
+            }
+        }
+        return value;
+    }
+
     private static object? NormalizeValue(object? rawValue)
     {
         if (rawValue is Agtype agtypeValue)
@@ -306,11 +315,24 @@ internal sealed class AgeEntityMapper
         }
 
         // Konnektr 2.x: complex property values arrive as Dictionary<string, object>
-        // from InferredObjectConverter. Convert them to the target C# type so the
-        // generated serializer receives them as SimpleValue (which it expects for
-        // simple POCOs like Point). For non-simple types (like MemorySource), leave
-        // as dictionary so the IDictionary check in MapVertex stores it as an
-        // EntityInfo that the generated complex serializer can process.
+        // from InferredObjectConverter. Convert to target C# type for simple POCOs.
+        var dictResult = ConvertDictionaryToSimplePoco(value, effectiveType);
+        if (dictResult != value) return dictResult;
+
+        // Handle numeric type conversions for edge entity property values
+        // that come from AGE as types different from the target CLR type.
+        var numericResult = CoerceNumericType(value, effectiveType);
+        if (numericResult != value) return numericResult;
+
+        return value;
+    }
+
+    /// <summary>
+    /// Attempts to convert IDictionary&lt;string, object?&gt; to a simple CLR type via JSON serialization.
+    /// Returns the original value if no conversion applies.
+    /// </summary>
+    private static object? ConvertDictionaryToSimplePoco(object? value, Type effectiveType)
+    {
         if (value is IDictionary<string, object?> dict
             && effectiveType != typeof(IDictionary<string, object>)
             && effectiveType != typeof(Dictionary<string, object>)
@@ -326,14 +348,20 @@ internal sealed class AgeEntityMapper
             }
             catch
             {
-                // Fall through — the dictionary will be handled below
+                // Fall through — the dictionary will be handled by MapVertex's IDictionary check
             }
         }
+        return value;
+    }
 
-        // Handle numeric type conversions for edge entity property values
-        // that come from AGE as types different from the target CLR type
-        // (e.g., AGE returns Decimal for numeric properties, target expects double).
-        if (value is not string && effectiveType != value.GetType())
+    /// <summary>
+    /// Coerces numeric types (e.g., decimal→double, long→int) when AGE returns
+    /// a different numeric type than the CLR property expects.
+    /// Returns the original value if no coercion applies.
+    /// </summary>
+    private static object? CoerceNumericType(object? value, Type effectiveType)
+    {
+        if (value is not string && effectiveType != value?.GetType())
         {
             try
             {
@@ -352,7 +380,6 @@ internal sealed class AgeEntityMapper
                 // If conversion fails, fall through to return original value
             }
         }
-
         return value;
     }
 }

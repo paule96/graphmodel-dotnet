@@ -22,8 +22,18 @@ using Cvoya.Graph.Model.Cypher.Querying.Cypher.Builders;
 /// </summary>
 internal sealed class CypherQueryScope(Type rootType) : ICypherQueryScope
 {
-    private readonly Dictionary<int, (string src, string rel, string tgt)> hopAliases = [];
-    private readonly Dictionary<int, (Type src, Type rel, Type tgt)> hopTypes = [];
+    /// <summary>
+    /// Represents a single hop's aliases in a path segment traversal.
+    /// </summary>
+    internal sealed record HopAliases(string SourceAlias, string RelationshipAlias, string TargetAlias);
+
+    /// <summary>
+    /// Represents a single hop's types in a path segment traversal.
+    /// </summary>
+    internal sealed record HopTypes(Type SourceType, Type RelationshipType, Type TargetType);
+
+    private readonly Dictionary<int, HopAliases> hopAliases = [];
+    private readonly Dictionary<int, HopTypes> hopTypes = [];
 
     public Type RootType { get; } = rootType;
     public string? CurrentAlias { get; set; }
@@ -64,20 +74,20 @@ internal sealed class CypherQueryScope(Type rootType) : ICypherQueryScope
 
     public void StoreHopAliases(int hopNumber, string sourceAlias, string relationshipAlias, string targetAlias)
     {
-        hopAliases[hopNumber] = (sourceAlias, relationshipAlias, targetAlias);
+        hopAliases[hopNumber] = new HopAliases(sourceAlias, relationshipAlias, targetAlias);
     }
 
-    public (string src, string rel, string tgt)? GetHopAliases(int hopNumber)
+    public HopAliases? GetHopAliases(int hopNumber)
     {
         return hopAliases.TryGetValue(hopNumber, out var aliases) ? aliases : null;
     }
 
     public void StoreHopTypes(int hopNumber, Type sourceType, Type relationshipType, Type targetType)
     {
-        hopTypes[hopNumber] = (sourceType, relationshipType, targetType);
+        hopTypes[hopNumber] = new HopTypes(sourceType, relationshipType, targetType);
     }
 
-    public (Type src, Type rel, Type tgt)? GetHopTypes(int hopNumber)
+    public HopTypes? GetHopTypes(int hopNumber)
     {
         return hopTypes.TryGetValue(hopNumber, out var types) ? types : null;
     }

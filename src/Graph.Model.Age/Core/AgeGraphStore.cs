@@ -46,21 +46,9 @@ public sealed class AgeGraphStore : IAsyncDisposable
         string? graphName = null,
         SchemaRegistry? schemaRegistry = null,
         ILoggerFactory? loggerFactory = null)
+        : this(BuildDataSource(connectionString), ResolveGraphName(graphName), loggerFactory ?? NullLoggerFactory.Instance, schemaRegistry)
     {
-        connectionString ??= Environment.GetEnvironmentVariable("AGE_CONNECTION_STRING") ?? "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=postgres";
-        graphName ??= Environment.GetEnvironmentVariable("AGE_GRAPH") ?? "graph_model";
-
-        var builder = new NpgsqlDataSourceBuilder(connectionString);
-        builder.UseAge();
-
-        dataSource = builder.Build();
         ownsDataSource = true;
-
-        this.graphName = graphName;
-        this.schemaRegistry = schemaRegistry ?? new SchemaRegistry();
-        this.loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
-
-        graphInitTask = InitializeGraphAsync();
     }
 
     /// <summary>
@@ -87,6 +75,17 @@ public sealed class AgeGraphStore : IAsyncDisposable
 
         graphInitTask = InitializeGraphAsync();
     }
+
+    private static NpgsqlDataSource BuildDataSource(string? connectionString)
+    {
+        connectionString ??= Environment.GetEnvironmentVariable("AGE_CONNECTION_STRING") ?? "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=postgres";
+        var builder = new NpgsqlDataSourceBuilder(connectionString);
+        builder.UseAge();
+        return builder.Build();
+    }
+
+    private static string ResolveGraphName(string? graphName)
+        => graphName ?? Environment.GetEnvironmentVariable("AGE_GRAPH") ?? "graph_model";
 
     /// <summary>
     /// Gets the graph abstraction for the configured AGE data source.

@@ -118,9 +118,9 @@ internal sealed class NestedCollectHandler
             : (_context.Scope.CurrentHop > 0 ? _context.Scope.CurrentHop - 1 : 0);
         var hopAliases = _context.Scope.GetHopAliases(hop);
 
-        string srcAlias = "src0", relAlias = "r0", tgtAlias = "tgt0";
-        if (hopAliases.HasValue)
-            (srcAlias, relAlias, tgtAlias) = hopAliases.Value;
+        string srcAlias = hopAliases?.SourceAlias ?? "src0";
+        string relAlias = hopAliases?.RelationshipAlias ?? "r0";
+        string tgtAlias = hopAliases?.TargetAlias ?? "tgt0";
 
         // Build collect expression
         var innerParam = innerLambda.Parameters[0];

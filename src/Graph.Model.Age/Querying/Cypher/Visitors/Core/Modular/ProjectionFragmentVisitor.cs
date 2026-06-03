@@ -65,12 +65,11 @@ internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
                         ? Context.Scope.LastPathSegmentHop
                         : 0;
                     var aliases = Context.Scope.GetHopAliases(hop);
-                    if (aliases.HasValue)
+                    if (aliases != null)
                     {
-                        var (src, rel, tgt) = aliases.Value;
-                        returns.Add($"{src} AS {cypherAlias}_{src}");
-                        returns.Add($"{rel} AS {cypherAlias}_{rel}");
-                        returns.Add($"{tgt} AS {cypherAlias}_{tgt}");
+                        returns.Add($"{aliases.SourceAlias} AS {cypherAlias}_{aliases.SourceAlias}");
+                        returns.Add($"{aliases.RelationshipAlias} AS {cypherAlias}_{aliases.RelationshipAlias}");
+                        returns.Add($"{aliases.TargetAlias} AS {cypherAlias}_{aliases.TargetAlias}");
                     }
                     else
                     {
@@ -180,30 +179,28 @@ internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
                 ? Context.Scope.GetHopAliases(lastPathSegmentHop)
                 : null;
 
-            if (hopAliases.HasValue)
+            if (hopAliases != null)
             {
-                var (srcAlias, relAlias, tgtAlias) = hopAliases.Value;
                 return member.Member.Name switch
                 {
-                    nameof(IGraphPathSegment.StartNode) => srcAlias,
-                    nameof(IGraphPathSegment.EndNode) => tgtAlias,
-                    nameof(IGraphPathSegment.Relationship) => relAlias,
-                    _ => $"{tgtAlias}.{member.Member.Name}"
+                    nameof(IGraphPathSegment.StartNode) => hopAliases.SourceAlias,
+                    nameof(IGraphPathSegment.EndNode) => hopAliases.TargetAlias,
+                    nameof(IGraphPathSegment.Relationship) => hopAliases.RelationshipAlias,
+                    _ => $"{hopAliases.TargetAlias}.{member.Member.Name}"
                 };
             }
 
             // Fallback: use CurrentHop-1 as the path segment hop if LastPathSegmentHop not set
             var hop = Context.Scope.CurrentHop > 0 ? Context.Scope.CurrentHop - 1 : 0;
             var fallbackAliases = Context.Scope.GetHopAliases(hop);
-            if (fallbackAliases.HasValue)
+            if (fallbackAliases != null)
             {
-                var (fsrc, frel, ftgt) = fallbackAliases.Value;
                 return member.Member.Name switch
                 {
-                    nameof(IGraphPathSegment.StartNode) => fsrc,
-                    nameof(IGraphPathSegment.EndNode) => ftgt,
-                    nameof(IGraphPathSegment.Relationship) => frel,
-                    _ => $"{ftgt}.{member.Member.Name}"
+                    nameof(IGraphPathSegment.StartNode) => fallbackAliases.SourceAlias,
+                    nameof(IGraphPathSegment.EndNode) => fallbackAliases.TargetAlias,
+                    nameof(IGraphPathSegment.Relationship) => fallbackAliases.RelationshipAlias,
+                    _ => $"{fallbackAliases.TargetAlias}.{member.Member.Name}"
                 };
             }
 

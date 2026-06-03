@@ -29,6 +29,39 @@ using Npgsql.Age.Types;
 internal static class ScalarResultMaterializer
 {
     /// <summary>
+    /// Type-dispatch dictionary mapping target CLR types to Agtype converters.
+    /// Each converter attempts to extract a native Agtype value with a fallback.
+    /// </summary>
+    private static readonly Dictionary<Type, Func<Agtype, object?>> AgtypeConverters = new()
+    {
+        [typeof(string)] = ag => { try { return ag.GetString(); } catch { return ag.ToString(); } },
+        [typeof(long)] = ag => { try { return ag.GetInt64(); } catch { return null; } },
+        [typeof(long?)] = ag => { try { return ag.GetInt64(); } catch { return null; } },
+        [typeof(int)] = ag =>
+        {
+            // count(*) in AGE returns bigint (Int64). Try Int32 first, then fall back to Int64 and cast.
+            try { return ag.GetInt32(); }
+            catch { try { return (int)ag.GetInt64(); } catch { return null; } }
+        },
+        [typeof(int?)] = ag =>
+        {
+            try { return ag.GetInt32(); }
+            catch { try { return (int)ag.GetInt64(); } catch { return null; } }
+        },
+        [typeof(short)] = ag => { try { return ag.GetInt16(); } catch { return null; } },
+        [typeof(short?)] = ag => { try { return ag.GetInt16(); } catch { return null; } },
+        [typeof(double)] = ag => { try { return ag.GetDouble(); } catch { return null; } },
+        [typeof(double?)] = ag => { try { return ag.GetDouble(); } catch { return null; } },
+        [typeof(float)] = ag => { try { return ag.GetFloat(); } catch { return null; } },
+        [typeof(float?)] = ag => { try { return ag.GetFloat(); } catch { return null; } },
+        [typeof(decimal)] = ag => { try { return ag.GetDecimal(); } catch { return null; } },
+        [typeof(decimal?)] = ag => { try { return ag.GetDecimal(); } catch { return null; } },
+        [typeof(bool)] = ag => { try { return ag.GetBoolean(); } catch { return null; } },
+        [typeof(bool?)] = ag => { try { return ag.GetBoolean(); } catch { return null; } },
+        [typeof(byte)] = ag => { try { return ag.GetByte(); } catch { return null; } },
+    };
+
+    /// <summary>
     /// Reads scalar results from a query and materializes them as <typeparamref name="T"/>.
     /// </summary>
     public static async Task<T?> MaterializeAsync<T>(
@@ -58,22 +91,16 @@ internal static class ScalarResultMaterializer
             var agVal = reader.GetFieldValue<Agtype>(0);
             object? rawValue = null;
 
-            // Use Agtype's native accessor methods based on target type
-            if (elementType == typeof(string)) { try { rawValue = agVal.GetString(); } catch { rawValue = agVal.ToString(); } }
-            else if (elementType == typeof(long) || elementType == typeof(long?)) { try { rawValue = agVal.GetInt64(); } catch { } }
-            else if (elementType == typeof(int) || elementType == typeof(int?))
+            // Look up the type converter from the dispatch dictionary (replaces 15-line if/else chain).
+            if (AgtypeConverters.TryGetValue(elementType, out var converter))
             {
-                // count(*) in AGE returns bigint (Int64). Try Int32 first, then fall back to Int64 and cast.
-                try { rawValue = agVal.GetInt32(); }
-                catch { try { rawValue = (int)agVal.GetInt64(); } catch { } }
+                rawValue = converter(agVal);
             }
-            else if (elementType == typeof(short) || elementType == typeof(short?)) { try { rawValue = agVal.GetInt16(); } catch { } }
-            else if (elementType == typeof(double) || elementType == typeof(double?)) { try { rawValue = agVal.GetDouble(); } catch { } }
-            else if (elementType == typeof(float) || elementType == typeof(float?)) { try { rawValue = agVal.GetFloat(); } catch { } }
-            else if (elementType == typeof(decimal) || elementType == typeof(decimal?)) { try { rawValue = agVal.GetDecimal(); } catch { } }
-            else if (elementType == typeof(bool) || elementType == typeof(bool?)) { try { rawValue = agVal.GetBoolean(); } catch { } }
-            else if (elementType == typeof(byte)) { try { rawValue = agVal.GetByte(); } catch { } }
-            else { try { rawValue = agVal.GetString() ?? agVal.ToString(); } catch { rawValue = agVal.ToString(); } }
+            else
+            {
+                // Fallback: can't add null-forgiving, and try is necessary here
+                try { rawValue = agVal.GetString() ?? agVal.ToString(); } catch { rawValue = agVal.ToString(); }
+            }
 
             if (rawValue is null)
                 rawValue = agVal.ToString();

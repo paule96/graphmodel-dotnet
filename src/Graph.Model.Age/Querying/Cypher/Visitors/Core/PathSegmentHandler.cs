@@ -27,18 +27,18 @@ internal sealed class PathSegmentHandler
 {
     private readonly CypherQueryContext _context;
     private readonly ILogger _logger;
-    private readonly Func<Expression, Expression> _visit;
+    private readonly Func<Expression, Expression> _visitExpression;
     private readonly TraversalFragmentVisitor _traversalVisitor;
 
     public PathSegmentHandler(
         CypherQueryContext context,
         ILogger logger,
-        Func<Expression, Expression> visit,
+        Func<Expression, Expression> visitExpression,
         TraversalFragmentVisitor traversalVisitor)
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _visit = visit ?? throw new ArgumentNullException(nameof(visit));
+        _visitExpression = visitExpression ?? throw new ArgumentNullException(nameof(visitExpression));
         _traversalVisitor = traversalVisitor ?? throw new ArgumentNullException(nameof(traversalVisitor));
     }
 
@@ -46,7 +46,7 @@ internal sealed class PathSegmentHandler
     {
         // Visit the source expression first so upstream operations (e.g., Traverse, Where) build their state before
         // we append this hop. This preserves MATCH ordering for nested PathSegments chains.
-        var sourceExpression = _visit(node.Arguments[0]);
+        var sourceExpression = _visitExpression(node.Arguments[0]);
 
         // Delegate to specialized traversal visitor which handles pattern generation and fragment emission
         _traversalVisitor.HandlePathSegments(node);
@@ -79,7 +79,7 @@ internal sealed class PathSegmentHandler
         }
 
         // Continue processing the expression tree
-        return _visit(node.Arguments[0]);
+        return _visitExpression(node.Arguments[0]);
     }
 
     public Expression HandleDirection(MethodCallExpression node)
@@ -96,6 +96,6 @@ internal sealed class PathSegmentHandler
         }
 
         // Continue processing the expression tree
-        return _visit(node.Arguments[0]);
+        return _visitExpression(node.Arguments[0]);
     }
 }

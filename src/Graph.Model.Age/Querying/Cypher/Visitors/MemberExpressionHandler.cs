@@ -98,6 +98,18 @@ internal sealed class MemberExpressionHandler
         return FallbackEvaluate(node);
     }
 
+    /// <summary>
+    /// Resolves an IGraphPathSegment property name to its corresponding alias.
+    /// </summary>
+    private string ResolveSegmentAlias(string segmentProperty)
+        => segmentProperty switch
+        {
+            nameof(IGraphPathSegment.StartNode) => _sourceAlias ?? "src0",
+            nameof(IGraphPathSegment.EndNode) => _targetAlias ?? "tgt0",
+            nameof(IGraphPathSegment.Relationship) => _relationshipAlias ?? "r0",
+            _ => throw new NotSupportedException($"Path segment property '{segmentProperty}' is not supported")
+        };
+
     private bool TryHandlePathSegmentNestedAccess(MemberExpression node, out Expression? result)
     {
         result = null;
@@ -111,13 +123,7 @@ internal sealed class MemberExpressionHandler
             var segmentProperty = pathSegmentMember.Member.Name;
             var nodeProperty = node.Member.Name;
 
-            var alias = segmentProperty switch
-            {
-                nameof(IGraphPathSegment.StartNode) => _sourceAlias ?? "src0",
-                nameof(IGraphPathSegment.EndNode) => _targetAlias ?? "tgt0",
-                nameof(IGraphPathSegment.Relationship) => _relationshipAlias ?? "r0",
-                _ => throw new NotSupportedException($"Path segment property '{segmentProperty}' is not supported")
-            };
+            var alias = ResolveSegmentAlias(segmentProperty);
 
             var resolved = $"{alias}.{MapPropertyName(nodeProperty)}";
             _logger.LogDebug("Mapped path segment property {SegmentProperty}.{NodeProperty} to {Result}",
@@ -188,13 +194,7 @@ internal sealed class MemberExpressionHandler
         if (typeof(IGraphPathSegment).IsAssignableFrom(param.Type))
         {
             _logger.LogDebug("Processing path segment parameter property: {Property}", node.Member.Name);
-            var propertyMapping = node.Member.Name switch
-            {
-                nameof(IGraphPathSegment.StartNode) => _sourceAlias ?? "src0",
-                nameof(IGraphPathSegment.EndNode) => _targetAlias ?? "tgt0",
-                nameof(IGraphPathSegment.Relationship) => _relationshipAlias ?? "r0",
-                _ => throw new NotSupportedException($"Path segment property '{node.Member.Name}' is not supported")
-            };
+            var propertyMapping = ResolveSegmentAlias(node.Member.Name);
             _logger.LogDebug("Mapped path segment property {Property} to alias {Alias}", node.Member.Name, propertyMapping);
             result = Expression.Constant(propertyMapping);
             return true;
@@ -215,13 +215,7 @@ internal sealed class MemberExpressionHandler
         {
             _logger.LogDebug("Processing nested path segment property access: {Expression}", node);
             var segmentProperty = nestedMember.Member.Name;
-            var alias = segmentProperty switch
-            {
-                nameof(IGraphPathSegment.StartNode) => _sourceAlias ?? "src0",
-                nameof(IGraphPathSegment.EndNode) => _targetAlias ?? "tgt0",
-                nameof(IGraphPathSegment.Relationship) => _relationshipAlias ?? "r0",
-                _ => throw new NotSupportedException($"Path segment property '{segmentProperty}' is not supported")
-            };
+            var alias = ResolveSegmentAlias(segmentProperty);
 
             if (segmentProperty == nameof(IGraphPathSegment.StartNode) && _sourceAlias == null)
                 _logger.LogError("CRITICAL: _sourceAlias is null for StartNode access - falling back to 'src'");
