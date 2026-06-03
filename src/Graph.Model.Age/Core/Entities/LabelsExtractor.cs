@@ -27,8 +27,16 @@ using Npgsql.Age.Types;
 internal static class LabelsExtractor
 {
     public static IReadOnlyList<string> ExtractLabels(Vertex vertex)
+        => ExtractLabels(vertex.Properties, vertex.Label);
+
+    public static IReadOnlyList<string> ExtractLabels(Edge edge)
+        => ExtractLabels(edge.Properties, edge.Label);
+
+    private static IReadOnlyList<string> ExtractLabels(
+        IReadOnlyDictionary<string, object> properties,
+        string? label)
     {
-        if (vertex.Properties.TryGetValue("inheritance_labels", out var inheritanceValue))
+        if (properties.TryGetValue("inheritance_labels", out var inheritanceValue))
         {
             return inheritanceValue switch
             {
@@ -39,7 +47,7 @@ internal static class LabelsExtractor
             };
         }
 
-        if (vertex.Properties.TryGetValue(nameof(INode.Labels), out var value))
+        if (properties.TryGetValue(nameof(INode.Labels), out var value))
         {
             return value switch
             {
@@ -49,40 +57,11 @@ internal static class LabelsExtractor
             };
         }
 
-        if (!string.IsNullOrEmpty(vertex.Label))
+        if (!string.IsNullOrEmpty(label))
         {
-            return vertex.Label.Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            return label.Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         }
 
         return [];
-    }
-
-    public static IReadOnlyList<string> ExtractLabels(Edge edge)
-    {
-        if (edge.Properties.TryGetValue("inheritance_labels", out var inheritanceValue))
-        {
-            return inheritanceValue switch
-            {
-                string[] stringArray => stringArray.ToList(),
-                IList<object?> list => list.Select(v => v?.ToString() ?? string.Empty).Where(static v => !string.IsNullOrWhiteSpace(v)).ToList(),
-                IEnumerable<string> stringList => stringList.ToList(),
-                _ => []
-            };
-        }
-
-        if (edge.Properties.TryGetValue(nameof(INode.Labels), out var value))
-        {
-            return value switch
-            {
-                IList<object?> list => list.Select(v => v?.ToString() ?? string.Empty).Where(static v => !string.IsNullOrWhiteSpace(v)).ToList(),
-                IEnumerable<string> stringList => stringList.ToList(),
-                _ => []
-            };
-        }
-
-        var labels = new List<string>();
-        if (!string.IsNullOrWhiteSpace(edge.Label))
-            labels.Add(edge.Label);
-        return labels;
     }
 }
