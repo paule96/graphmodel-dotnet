@@ -305,6 +305,8 @@ The constructor takes `Visit` as a `Func<Expression, Expression?>` delegate. The
 | m3 | Move `ComplexPropertyLoadingFragment` to `ProjectionFragmentVisitor` | Moved fragment emission from `AgeCypherQueryVisitor.VisitThenSelect` into `ProjectionFragmentVisitor.HandleSelect` |
 | M8 | Single-pass validation in `PropertyRuleValidator` | Combined two passes into one using `seenProperties` HashSet — eliminates duplicate enumeration of `schema.Properties` |
 | M5 | Extract `FragmentBundle` for `AgeFragmentRenderer` | Created `FragmentBundle` record with `Extract()` factory — replaces 12 individual `OfType<T>().ToList()` calls with one |
+| m4 | Simplify `LabelsExtractor` duplicate code | Merged two near-identical `ExtractLabels(Vertex)` and `ExtractLabels(Edge)` into a single private helper |
+| m5 | Add XML doc to `CollectionHelper` | Added `<typeparam>` and `<param>` docs explaining dual-role of generic parameter |
 
 ### Not Completed (Lower Priority)
 
