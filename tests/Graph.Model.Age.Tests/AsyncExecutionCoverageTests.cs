@@ -34,13 +34,13 @@ public class AsyncExecutionCoverageTests : AgeTest
         // Arrange
         var person1 = new Person { FirstName = "Alice", LastName = "Smith" };
         var person2 = new Person { FirstName = "Bob", LastName = "Jones" };
-        await Graph.CreateNodeAsync(person1, null, default);
-        await Graph.CreateNodeAsync(person2, null, default);
+        await Graph.CreateNodeAsync(person1, null, TestContext.Current.CancellationToken);
+        await Graph.CreateNodeAsync(person2, null, TestContext.Current.CancellationToken);
 
         // Act - Explicitly use async extension
         var results = await (await Graph.NodesAsync<Person>())
             .Where(p => p.FirstName == "Alice" || p.FirstName == "Bob")
-            .ToListAsync(default);
+            .ToListAsync(TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(2, results.Count);
@@ -51,12 +51,12 @@ public class AsyncExecutionCoverageTests : AgeTest
     {
         // Arrange
         var person = new Person { FirstName = "Charlie", LastName = "Brown" };
-        await Graph.CreateNodeAsync(person, null, default);
+        await Graph.CreateNodeAsync(person, null, TestContext.Current.CancellationToken);
 
         // Act
         var results = await (await Graph.NodesAsync<Person>())
             .Where(p => p.FirstName == "Charlie")
-            .ToArrayAsync(default);
+            .ToArrayAsync(TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Single(results);
@@ -69,13 +69,13 @@ public class AsyncExecutionCoverageTests : AgeTest
         // Arrange
         var person1 = new Person { FirstName = "Dave", LastName = "Wilson" };
         var person2 = new Person { FirstName = "Eve", LastName = "Davis" };
-        await Graph.CreateNodeAsync(person1, null, default);
-        await Graph.CreateNodeAsync(person2, null, default);
+        await Graph.CreateNodeAsync(person1, null, TestContext.Current.CancellationToken);
+        await Graph.CreateNodeAsync(person2, null, TestContext.Current.CancellationToken);
 
         // Act
         var count = await (await Graph.NodesAsync<Person>())
             .Where(p => p.FirstName == "Dave" || p.FirstName == "Eve")
-            .CountAsync(default);
+            .CountAsync(TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(2, count);
@@ -86,11 +86,11 @@ public class AsyncExecutionCoverageTests : AgeTest
     {
         // Arrange
         var person = new Person { FirstName = "Frank", LastName = "Miller" };
-        await Graph.CreateNodeAsync(person, null, default);
+        await Graph.CreateNodeAsync(person, null, TestContext.Current.CancellationToken);
 
         // Act
         var exists = await (await Graph.NodesAsync<Person>())
-            .AnyAsync(p => p.FirstName == "Frank", default);
+            .AnyAsync(p => p.FirstName == "Frank", TestContext.Current.CancellationToken);
 
         // Assert
         Assert.True(exists);
@@ -101,12 +101,12 @@ public class AsyncExecutionCoverageTests : AgeTest
     {
         // Arrange
         var person = new Person { FirstName = "Grace", LastName = "Lee" };
-        await Graph.CreateNodeAsync(person, null, default);
+        await Graph.CreateNodeAsync(person, null, TestContext.Current.CancellationToken);
 
         // Act
         var exists = await (await Graph.NodesAsync<Person>())
             .Where(p => p.FirstName == "Grace")
-            .AnyAsync(default);
+            .AnyAsync(TestContext.Current.CancellationToken);
 
         // Assert
         Assert.True(exists);
@@ -117,11 +117,11 @@ public class AsyncExecutionCoverageTests : AgeTest
     {
         // Arrange
         var person = new Person { FirstName = "Henry", LastName = "Taylor" };
-        await Graph.CreateNodeAsync(person, null, default);
+        await Graph.CreateNodeAsync(person, null, TestContext.Current.CancellationToken);
 
         // Act
         var result = await (await Graph.NodesAsync<Person>())
-            .FirstAsync(p => p.FirstName == "Henry", default);
+            .FirstAsync(p => p.FirstName == "Henry", TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal("Henry", result.FirstName);
@@ -133,12 +133,12 @@ public class AsyncExecutionCoverageTests : AgeTest
     {
         // Arrange
         var person = new Person { FirstName = "Ivy", LastName = "Anderson" };
-        await Graph.CreateNodeAsync(person, null, default);
+        await Graph.CreateNodeAsync(person, null, TestContext.Current.CancellationToken);
 
         // Act
         var result = await (await Graph.NodesAsync<Person>())
             .Where(p => p.FirstName == "Ivy")
-            .FirstAsync(default);
+            .FirstAsync(TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal("Ivy", result.FirstName);
@@ -169,12 +169,12 @@ public class AsyncExecutionCoverageTests : AgeTest
     {
         // Arrange
         var person = new Person { FirstName = "Kelly", LastName = "White" };
-        await Graph.CreateNodeAsync(person, null, default);
+        await Graph.CreateNodeAsync(person, null, TestContext.Current.CancellationToken);
 
         // Act
         var result = await (await Graph.NodesAsync<Person>())
             .Where(p => p.FirstName == "Kelly")
-            .SingleAsync(default);
+            .SingleAsync(TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal("Kelly", result.FirstName);
@@ -186,13 +186,13 @@ public class AsyncExecutionCoverageTests : AgeTest
         // Arrange
         var person1 = new Person { FirstName = "Leo", LastName = "Harris" };
         var person2 = new Person { FirstName = "Mia", LastName = "Martin" };
-        await Graph.CreateNodeAsync(person1, null, default);
-        await Graph.CreateNodeAsync(person2, null, default);
+        await Graph.CreateNodeAsync(person1, null, TestContext.Current.CancellationToken);
+        await Graph.CreateNodeAsync(person2, null, TestContext.Current.CancellationToken);
 
         // Act
         var count = await (await Graph.NodesAsync<Person>())
             .Where(p => p.FirstName == "Leo" || p.FirstName == "Mia")
-            .LongCountAsync(default);
+            .LongCountAsync(TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(2L, count);
@@ -206,22 +206,22 @@ public class AsyncExecutionCoverageTests : AgeTest
         var person2 = new Person { FirstName = "Oscar", LastName = "Martinez", Age = 30 };
         var person3 = new Person { FirstName = "Paula", LastName = "Robinson", Age = 35 };
         
-        await Graph.CreateNodeAsync(person1, null, default);
-        await Graph.CreateNodeAsync(person2, null, default);
-        await Graph.CreateNodeAsync(person3, null, default);
+        await Graph.CreateNodeAsync(person1, null, TestContext.Current.CancellationToken);
+        await Graph.CreateNodeAsync(person2, null, TestContext.Current.CancellationToken);
+        await Graph.CreateNodeAsync(person3, null, TestContext.Current.CancellationToken);
 
         var knows1 = new Knows { StartNodeId = person1.Id, EndNodeId = person2.Id, Since = DateTime.UtcNow };
         var knows2 = new Knows { StartNodeId = person2.Id, EndNodeId = person3.Id, Since = DateTime.UtcNow };
         
-        await Graph.CreateRelationshipAsync(knows1, null, default);
-        await Graph.CreateRelationshipAsync(knows2, null, default);
+        await Graph.CreateRelationshipAsync(knows1, null, TestContext.Current.CancellationToken);
+        await Graph.CreateRelationshipAsync(knows2, null, TestContext.Current.CancellationToken);
 
         // Act - Complex async query with projection
         var results = await (await Graph.NodesAsync<Person>())
             .Where(p => p.Age >= 25 && p.Age <= 35)
             .OrderBy(p => p.Age)
             .Select(p => new { p.FirstName, p.Age })
-            .ToListAsync(default);
+            .ToListAsync(TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(3, results.Count);
@@ -240,18 +240,18 @@ public class AsyncExecutionCoverageTests : AgeTest
         var person1 = new Person { FirstName = "Quinn", LastName = "Clark" };
         var person2 = new Person { FirstName = "Rachel", LastName = "Lewis" };
         
-        await Graph.CreateNodeAsync(person1, null, default);
-        await Graph.CreateNodeAsync(person2, null, default);
+        await Graph.CreateNodeAsync(person1, null, TestContext.Current.CancellationToken);
+        await Graph.CreateNodeAsync(person2, null, TestContext.Current.CancellationToken);
 
         var knows = new Knows { StartNodeId = person1.Id, EndNodeId = person2.Id, Since = DateTime.UtcNow };
-        await Graph.CreateRelationshipAsync(knows, null, default);
+        await Graph.CreateRelationshipAsync(knows, null, TestContext.Current.CancellationToken);
 
         // Act
         var results = await (await Graph.NodesAsync<Person>())
             .Where(p => p.FirstName == "Quinn")
             .PathSegments<Person, Knows, Person>()
             .Select(ps => ps.EndNode)
-            .ToListAsync(default);
+            .ToListAsync(TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Single(results);
@@ -264,7 +264,7 @@ public class AsyncExecutionCoverageTests : AgeTest
         // Arrange
         using var cts = new CancellationTokenSource();
         var person = new Person { FirstName = "Sam", LastName = "Walker" };
-        await Graph.CreateNodeAsync(person, null, default);
+        await Graph.CreateNodeAsync(person, null, TestContext.Current.CancellationToken);
 
         // Act - Token is passed but not cancelled
         var results = await (await Graph.NodesAsync<Person>())
@@ -281,8 +281,8 @@ public class AsyncExecutionCoverageTests : AgeTest
         // Arrange
         var person1 = new Person { FirstName = "Tom", LastName = "Baker" };
         var person2 = new Person { FirstName = "Uma", LastName = "Foster" };
-        await Graph.CreateNodeAsync(person1, null, default);
-        await Graph.CreateNodeAsync(person2, null, default);
+        await Graph.CreateNodeAsync(person1, null, TestContext.Current.CancellationToken);
+        await Graph.CreateNodeAsync(person2, null, TestContext.Current.CancellationToken);
 
         // Act - Materialize to list to trigger async enumeration
         var results = new List<Person>();
@@ -291,7 +291,7 @@ public class AsyncExecutionCoverageTests : AgeTest
         var enumerated = await (await Graph.NodesAsync<Person>())
             .Where(p => p.FirstName == "Tom" || p.FirstName == "Uma")
             .OrderBy(p => p.FirstName)
-            .ToListAsync(default);
+            .ToListAsync(TestContext.Current.CancellationToken);
 
         results.AddRange(enumerated);
 
@@ -308,24 +308,24 @@ public class AsyncExecutionCoverageTests : AgeTest
         var person1 = new Person { FirstName = "Victor", LastName = "Hughes", Age = 40 };
         var person2 = new Person { FirstName = "Wendy", LastName = "Cooper", Age = 45 };
         var person3 = new Person { FirstName = "Xavier", LastName = "Reed", Age = 50 };
-        await Graph.CreateNodeAsync(person1, null, default);
-        await Graph.CreateNodeAsync(person2, null, default);
-        await Graph.CreateNodeAsync(person3, null, default);
+        await Graph.CreateNodeAsync(person1, null, TestContext.Current.CancellationToken);
+        await Graph.CreateNodeAsync(person2, null, TestContext.Current.CancellationToken);
+        await Graph.CreateNodeAsync(person3, null, TestContext.Current.CancellationToken);
 
         // Act - Multiple async operations to exercise streaming behavior
         var count = await (await Graph.NodesAsync<Person>())
             .Where(p => p.Age >= 40 && p.Age <= 50)
-            .CountAsync(default);
+            .CountAsync(TestContext.Current.CancellationToken);
         
         var firstPerson = await (await Graph.NodesAsync<Person>())
             .Where(p => p.Age >= 40 && p.Age <= 50)
             .OrderBy(p => p.Age)
-            .FirstAsync(default);
+            .FirstAsync(TestContext.Current.CancellationToken);
         
         var allResults = await (await Graph.NodesAsync<Person>())
             .Where(p => p.Age >= 40 && p.Age <= 50)
             .OrderBy(p => p.Age)
-            .ToListAsync(default);
+            .ToListAsync(TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(3, count);
@@ -342,7 +342,7 @@ public class AsyncExecutionCoverageTests : AgeTest
         // Arrange
         using var cts = new CancellationTokenSource();
         var person = new Person { FirstName = "Yara", LastName = "Bennett" };
-        await Graph.CreateNodeAsync(person, null, default);
+        await Graph.CreateNodeAsync(person, null, TestContext.Current.CancellationToken);
 
         // Act - Multiple async operations with cancellation token
         var exists = await (await Graph.NodesAsync<Person>())
@@ -363,11 +363,11 @@ public class AsyncExecutionCoverageTests : AgeTest
         // Act - Query with no results exercises empty enumeration path
         var count = await (await Graph.NodesAsync<Person>())
             .Where(p => p.FirstName == "NonExistentName12345")
-            .CountAsync(default);
+            .CountAsync(TestContext.Current.CancellationToken);
         
         var results = await (await Graph.NodesAsync<Person>())
             .Where(p => p.FirstName == "NonExistentName12345")
-            .ToListAsync(default);
+            .ToListAsync(TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(0, count);
@@ -380,15 +380,15 @@ public class AsyncExecutionCoverageTests : AgeTest
         // Arrange
         var person1 = new Person { FirstName = "Zoe", LastName = "Price", Age = 28 };
         var person2 = new Person { FirstName = "Adam", LastName = "Bell", Age = 32 };
-        await Graph.CreateNodeAsync(person1, null, default);
-        await Graph.CreateNodeAsync(person2, null, default);
+        await Graph.CreateNodeAsync(person1, null, TestContext.Current.CancellationToken);
+        await Graph.CreateNodeAsync(person2, null, TestContext.Current.CancellationToken);
 
         // Act - Projection exercises async enumeration with type transformation
         var names = await (await Graph.NodesAsync<Person>())
             .Where(p => p.FirstName == "Zoe" || p.FirstName == "Adam")
             .OrderBy(p => p.FirstName)
             .Select(p => p.FirstName)
-            .ToListAsync(default);
+            .ToListAsync(TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(2, names.Count);

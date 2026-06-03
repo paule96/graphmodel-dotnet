@@ -27,6 +27,12 @@ public sealed class ResultMaterializer<TValueConverter>
     private readonly TValueConverter _valueConverter;
     private readonly ILogger<ResultMaterializer<TValueConverter>> _logger;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ResultMaterializer{TValueConverter}"/> class.
+    /// </summary>
+    /// <param name="entityFactory">The entity factory for deserializing EntityInfo objects.</param>
+    /// <param name="valueConverter">The provider-specific value converter.</param>
+    /// <param name="loggerFactory">Optional logger factory for diagnostic output.</param>
     public ResultMaterializer(EntityFactory entityFactory, TValueConverter valueConverter, ILoggerFactory? loggerFactory = null)
     {
         _entityFactory = entityFactory ?? throw new ArgumentNullException(nameof(entityFactory));
@@ -34,6 +40,13 @@ public sealed class ResultMaterializer<TValueConverter>
         _logger = loggerFactory?.CreateLogger<ResultMaterializer<TValueConverter>>() ?? NullLogger<ResultMaterializer<TValueConverter>>.Instance;
     }
 
+    /// <summary>
+    /// Materializes a list of EntityInfo objects into a strongly-typed result.
+    /// </summary>
+    /// <typeparam name="T">The target type to materialize to.</typeparam>
+    /// <param name="entityInfos">The list of EntityInfo objects to materialize.</param>
+    /// <param name="cancellationToken">Optional cancellation token.</param>
+    /// <returns>The materialized result, or default if no entities are provided.</returns>
     public async Task<T?> MaterializeAsync<T>(List<EntityInfo> entityInfos, CancellationToken cancellationToken = default)
     {
         var targetType = typeof(T);
@@ -217,7 +230,7 @@ public sealed class ResultMaterializer<TValueConverter>
     }
 
     /// <summary>
-    /// Materializes a List<T> property from a SimpleValue that contains a raw list
+    /// Materializes a List{T} property from a SimpleValue that contains a raw list
     /// of values (produced by collect() in AGE queries).
     /// Each element may be an EntityInfo (for map projections) or a scalar value.
     /// </summary>
