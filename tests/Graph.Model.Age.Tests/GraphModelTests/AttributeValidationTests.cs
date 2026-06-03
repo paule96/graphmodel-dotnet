@@ -20,4 +20,13 @@ public class AttributeValidationTests(TestInfrastructureFixture fixture) :
     AgeTest(fixture),
     IAttributeValidationTests
 {
+    /// <summary>
+    /// Skipped: Full-text search is not supported in Apache AGE.
+    /// See docs/age-fulltext-search-limitations.md
+    /// </summary>
+    [Fact(Skip = "Full-text search is not supported in Apache AGE.")]
+    public new async Task PropertyWithIncludeInFullTextSearch_ConfiguresSearchIndex()
+    {
+        await Task.CompletedTask;
+    }
 }

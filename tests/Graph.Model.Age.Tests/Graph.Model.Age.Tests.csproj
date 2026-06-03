@@ -5,6 +5,7 @@
         <OutputType>Exe</OutputType>
         <IsPackable>false</IsPackable>
         <AssemblyName>Cvoya.Graph.Model.Age.Tests</AssemblyName>
+        <NoWarn>$(NoWarn);CS1591;CS1570;CS1587</NoWarn>
         <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
         <UseMicrosoftTestingPlatform>true</UseMicrosoftTestingPlatform>
         <TestingPlatformShowTestsFailure>true</TestingPlatformShowTestsFailure>

@@ -20,4 +20,13 @@ public class TakeOperatorTests(TestInfrastructureFixture fixture) :
     AgeTest(fixture),
     ITakeOperatorTests
 {
+    /// <summary>
+    /// Skipped: Full-text search is not supported in Apache AGE.
+    /// See docs/age-fulltext-search-limitations.md
+    /// </summary>
+    [Fact(Skip = "Full-text search is not supported in Apache AGE.")]
+    public new async Task TakeOperator_WithFullTextSearch_GeneratesCorrectCypher()
+    {
+        await Task.CompletedTask;
+    }
 }

@@ -57,63 +57,6 @@ internal static class AgeValueConverters
         return agTypeStr;
     }
 
-    public static object? ConvertSingleAgtypeElement(Agtype elem, Type targetType)
-    {
-        if (elem.IsVertex)
-        {
-            try { return elem.GetVertex(); } catch { }
-        }
-        if (elem.IsEdge)
-        {
-            try { return elem.GetEdge(); } catch { }
-        }
-
-        if (targetType == typeof(string))
-        {
-            try { return elem.GetString(); } catch { return elem.ToString()?.Trim('"'); }
-        }
-        if (targetType == typeof(int)) { try { return elem.GetInt32(); } catch { } }
-        if (targetType == typeof(long)) { try { return elem.GetInt64(); } catch { } }
-        if (targetType == typeof(double)) { try { return elem.GetDouble(); } catch { } }
-        if (targetType == typeof(float)) { try { return elem.GetFloat(); } catch { } }
-        if (targetType == typeof(decimal)) { try { return elem.GetDecimal(); } catch { } }
-        if (targetType == typeof(bool)) { try { return elem.GetBoolean(); } catch { } }
-        if (targetType == typeof(DateTime))
-        {
-            try
-            {
-                var strVal = (elem.GetString() ?? elem.ToString())?.Trim('"', ' ', '\'');
-                if (DateTime.TryParse(strVal, System.Globalization.CultureInfo.InvariantCulture,
-                    System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
-                    return dt;
-            }
-            catch { }
-        }
-
-        // Handle Agtype maps (from collect({key: value, ...}))
-        try
-        {
-            var strVal = elem.GetString();
-            if (!string.IsNullOrEmpty(strVal))
-            {
-                var trimmed = strVal.Trim();
-                if (trimmed.StartsWith("{"))
-                    return ConvertAgtypeMapToEntityInfo(elem, targetType);
-            }
-        }
-        catch { }
-
-        try
-        {
-            var strVal = elem.ToString()?.Trim();
-            if (!string.IsNullOrEmpty(strVal) && strVal.StartsWith("{"))
-                return ConvertAgtypeMapToEntityInfo(elem, targetType);
-        }
-        catch { }
-
-        return ConvertScalarAgtype(elem.ToString() ?? string.Empty, targetType);
-    }
-
     public static EntityInfo ConvertAgtypeMapToEntityInfo(Agtype map, Type targetType)
     {
         var simpleProps = new Dictionary<string, Property>(StringComparer.Ordinal);

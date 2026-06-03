@@ -231,20 +231,6 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
             return _collectionHandler.HandleContainsMethod(node);
         }
 
-        // Handle .ToList() on nested Select expressions from GroupBy results
-        // Pattern: group.Select(p => new { ... }).ToList() → collect({...})
-        if (node.Method.Name == "ToList" && node.Arguments.Count == 1)
-        {
-            try
-            {
-                return HandleToListOnNestedSelect(node);
-            }
-            catch
-            {
-                // Fall through to compile-time evaluation
-            }
-        }
-
         // For any other method call, try to evaluate it at compile time
         try
         {
@@ -303,190 +289,10 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
         return Expression.Constant(caseExpression);
     }
 
-    protected override Expression VisitNew(NewExpression node)
-    {
-        // Handle anonymous type creation: new { Start = ps.StartNode.FirstName, End = ps.EndNode.FirstName }
-        // Convert to comma-separated list of property expressions
-        var memberNames = new List<string>();
-        var expressions = new List<string>();
-        
-        // Track which Cypher variables (aliases) are already being returned to avoid duplicates
-        // Key: Cypher variable (e.g., "src0", "r0", "tgt0"), Value: column name it's returned as
-        var returnedVariables = new Dictionary<string, string>();
-
-        // First pass: scan for non-PathSegment arguments to track what's already being returned
-        for (int i = 0; i < node.Arguments.Count; i++)
-        {
-            var argument = node.Arguments[i];
-            
-            // Skip PathSegment parameters in first pass
-            if (argument is ParameterExpression paramExpr && IsPathSegmentType(paramExpr.Type))
-                continue;
-            
-            // Visit the argument to get the Cypher expression
-            var cypherExpression = VisitAndReturnCypher(argument);
-            
-            // Extract the base Cypher variable (e.g., "src0" from "src0.FirstName" or just "src0")
-            var baseVariable = cypherExpression.Split('.')[0].Trim();
-            var memberName = node.Members?[i]?.Name ?? $"Item{i + 1}";
-            
-            // Track this variable as being returned
-            if (!string.IsNullOrEmpty(baseVariable))
-            {
-                returnedVariables[baseVariable] = $"c_{memberName}";
-            }
-        }
-
-        // Second pass: process all arguments and build expressions
-        for (int i = 0; i < node.Arguments.Count; i++)
-        {
-            var argument = node.Arguments[i];
-            var memberName = node.Members?[i]?.Name ?? $"Item{i + 1}";
-            
-            // Special handling for PathSegment parameter projections
-            if (argument is ParameterExpression paramExpr && IsPathSegmentType(paramExpr.Type))
-            {
-                // PathSegment projections need to return all three components (source, relationship, target)
-                // so they can be reconstructed into a PathSegment object by the result processor.
-                // Always emit all 3 columns even if some are duplicates of other members —
-                // BuildColumnDefinitions expands path segments into 3 columns so the counts must match.
-                
-                var pathSegmentParts = new List<string>();
-                
-                if (_sourceAlias != null)
-                {
-                    pathSegmentParts.Add($"{_sourceAlias} AS c_{memberName}_{_sourceAlias}");
-                    returnedVariables[_sourceAlias] = $"c_{memberName}_{_sourceAlias}";
-                }
-                
-                if (_relationshipAlias != null)
-                {
-                    pathSegmentParts.Add($"{_relationshipAlias} AS c_{memberName}_{_relationshipAlias}");
-                    returnedVariables[_relationshipAlias] = $"c_{memberName}_{_relationshipAlias}";
-                }
-                
-                if (_targetAlias != null)
-                {
-                    pathSegmentParts.Add($"{_targetAlias} AS c_{memberName}_{_targetAlias}");
-                    returnedVariables[_targetAlias] = $"c_{memberName}_{_targetAlias}";
-                }
-                
-                if (pathSegmentParts.Count > 0)
-                {
-                    var pathSegmentProjection = string.Join(", ", pathSegmentParts);
-                    memberNames.Add(memberName);
-                    expressions.Add(pathSegmentProjection);
-                    _logger.LogDebug("Added PathSegment projection: {Projection}", pathSegmentProjection);
-                }
-                else
-                {
-                    // All components already returned - still need to track this member for result processing
-                    memberNames.Add(memberName);
-                    // Add placeholder to maintain member count (will be handled by result processor)
-                    _logger.LogDebug("PathSegment {MemberName} has no new columns; components already returned", memberName);
-                }
-            }
-            else
-            {
-                // Visit the argument to get the Cypher expression
-                var cypherExpression = VisitAndReturnCypher(argument);
-                
-                memberNames.Add(memberName);
-                expressions.Add($"{cypherExpression} AS c_{memberName}");
-            }
-        }
-
-        // Return the combined expression for the SELECT clause
-        var selectExpression = string.Join(", ", expressions);
-        _logger.LogDebug("VisitNew returning select expression: {Expression}", selectExpression);
-        return Expression.Constant(selectExpression);
-    }
-
     // String methods moved to StringMethodHandler.
     // Math methods moved to MathMethodHandler.
     // DateTime methods moved to DateTimeMethodHandler.
     // Collection methods (Contains, Count, GroupingAggregation) moved to CollectionExpressionHandler.
-
-    /// <summary>
-    /// Handles .ToList() on nested Select expressions from GroupBy results.
-    /// Pattern: group.Select(p => new { Foo = p.EndNode.FirstName }).ToList()
-    /// Translates to: collect({Foo: tgt0.FirstName})
-    /// Uses top-down expression tree walking to avoid the visitor's inside-out ConstantExpression issue.
-    /// </summary>
-    private Expression HandleToListOnNestedSelect(MethodCallExpression node)
-    {
-        var selectSource = node.Arguments[0];
-
-        if (selectSource is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } ue)
-            selectSource = ue.Operand;
-
-        if (selectSource is not MethodCallExpression selectCall ||
-            selectCall.Method.Name != "Select" ||
-            selectCall.Arguments.Count < 2)
-        {
-            throw new InvalidOperationException("ToList source is not a Select call");
-        }
-
-        var groupSource = selectCall.Arguments[0];
-        if (groupSource is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } gsConvert)
-            groupSource = gsConvert.Operand;
-
-        if (groupSource is ParameterExpression groupParam &&
-            groupParam.Type.IsGenericType &&
-            groupParam.Type.GetGenericTypeDefinition().Name.Contains("IGrouping"))
-        {
-            var lambdaArg = selectCall.Arguments[1];
-            if (lambdaArg is UnaryExpression { NodeType: ExpressionType.Quote } quote)
-                lambdaArg = quote.Operand;
-            var innerLambda = (LambdaExpression)lambdaArg;
-            var innerParam = innerLambda.Parameters[0]; // e.g., "p" of type IGraphPathSegment
-
-            // Use top-down walking — resolves p.EndNode.FirstName → tgt0.FirstName directly
-            string collectExpr = TranslateForCollect(innerLambda.Body, innerParam);
-
-            _logger.LogDebug("Translated group.Select().ToList() to collect({Expr})", collectExpr);
-            return Expression.Constant($"collect({collectExpr})");
-        }
-
-        throw new InvalidOperationException("ToList source Select is not on an IGrouping");
-    }
-
-    /// <summary>
-    /// Top-down translation of a Select lambda body to a Cypher expression for collect().
-    /// Handles NewExpression (anonymous types), MemberExpression (property chains),
-    /// BinaryExpression (arithmetic), MethodCallExpression (.Days, .Subtract), etc.
-    /// Unlike VisitAndReturnCypher, this walks the tree top-down to correctly resolve
-    /// path segment chains like p.EndNode.FirstName → tgt0.FirstName.
-    /// </summary>
-    private string TranslateForCollect(Expression body, ParameterExpression param)
-    {
-        return CollectExpressionTranslator.TranslateInnerSelectBody(
-            body, param,
-            _sourceAlias ?? "src0",
-            _relationshipAlias ?? "r0",
-            _targetAlias ?? "tgt0");
-    }
-
-    /// <summary>
-    /// Top-down translation of a single expression within an inner Select lambda.
-    /// </summary>
-    private string TranslateExpressionForCollect(Expression expr, ParameterExpression param)
-    {
-        return CollectExpressionTranslator.TranslateInnerExpression(
-            expr, param,
-            _sourceAlias ?? "src0",
-            _relationshipAlias ?? "r0",
-            _targetAlias ?? "tgt0");
-    }
-
-    private string TranslateMethodForCollect(MethodCallExpression mc, ParameterExpression param)
-    {
-        return CollectExpressionTranslator.TranslateInnerMethodCall(
-            mc, param,
-            _sourceAlias ?? "src0",
-            _relationshipAlias ?? "r0",
-            _targetAlias ?? "tgt0");
-    }
 
     /// <summary>
     /// Handles parameter expressions, particularly for PathSegment parameters.
@@ -516,9 +322,6 @@ internal sealed class AgeExpressionToCypherVisitor : ExpressionVisitor
         _logger.LogDebug("Parameter is node/relationship, returning alias: {Alias}", _alias);
         return Expression.Constant(_alias);
     }
-
-    private static bool IsPathSegmentType(Type type)
-        => ExpressionTranslationHelper.IsPathSegmentType(type);
 
     // MapPropertyName and TryCompileEval are now imported via
     // `using static ExpressionTranslationHelper` at the top of the file.

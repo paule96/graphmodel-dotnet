@@ -97,7 +97,7 @@ internal static class AgeSerializationBridge
             if (effectiveType == typeof(Point))
             {
                 using var doc = JsonDocument.Parse(strVal);
-                return ParsePointFromJson(doc.RootElement);
+                return EntityInfoBuilder.ParsePointFromJson(doc.RootElement);
             }
             if (effectiveType == typeof(bool))
             {
@@ -116,25 +116,4 @@ internal static class AgeSerializationBridge
         return value;
     }
 
-    private static Point ParsePointFromJson(JsonElement json)
-    {
-        double longitude = 0, latitude = 0, height = 0;
-        if (json.TryGetProperty("longitude", out var lon)) longitude = lon.GetDouble();
-        else if (json.TryGetProperty("Longitude", out lon)) longitude = lon.GetDouble();
-        else if (json.TryGetProperty("x", out var x)) longitude = x.GetDouble();
-        else if (json.ValueKind == JsonValueKind.Array && json.GetArrayLength() >= 2)
-        {
-            longitude = json[0].GetDouble();
-            latitude = json[1].GetDouble();
-            if (json.GetArrayLength() >= 3) height = json[2].GetDouble();
-            return new Point { Longitude = longitude, Latitude = latitude, Height = height };
-        }
-        if (json.TryGetProperty("latitude", out var lat)) latitude = lat.GetDouble();
-        else if (json.TryGetProperty("Latitude", out lat)) latitude = lat.GetDouble();
-        else if (json.TryGetProperty("y", out var y)) latitude = y.GetDouble();
-        if (json.TryGetProperty("height", out var h)) height = h.GetDouble();
-        else if (json.TryGetProperty("Height", out h)) height = h.GetDouble();
-        else if (json.TryGetProperty("z", out var z)) height = z.GetDouble();
-        return new Point { Longitude = longitude, Latitude = latitude, Height = height };
-    }
 }

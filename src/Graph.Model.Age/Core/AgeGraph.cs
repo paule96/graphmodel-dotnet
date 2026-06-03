@@ -321,25 +321,25 @@ internal sealed class AgeGraph : IGraph
 
     /// <inheritdoc />
     public Task<IGraphQueryable<IEntity>> SearchAsync(string query, IGraphTransaction? transaction = null)
-        => GraphSearchHelper.SearchAsync(query, graphContext, transaction, logger);
+        => throw new NotSupportedException("Full-text search is not supported in Apache AGE. See docs/age-fulltext-search-limitations.md for details.");
 
     /// <inheritdoc />
     public Task<IGraphNodeQueryable<INode>> SearchNodesAsync(string query, IGraphTransaction? transaction = null)
-        => GraphSearchHelper.SearchNodesAsync(query, graphContext, transaction, logger);
+        => throw new NotSupportedException("Full-text search is not supported in Apache AGE. See docs/age-fulltext-search-limitations.md for details.");
 
     /// <inheritdoc />
     public Task<IGraphRelationshipQueryable<IRelationship>> SearchRelationshipsAsync(string query, IGraphTransaction? transaction = null)
-        => GraphSearchHelper.SearchRelationshipsAsync(query, graphContext, transaction, logger);
+        => throw new NotSupportedException("Full-text search is not supported in Apache AGE. See docs/age-fulltext-search-limitations.md for details.");
 
     /// <inheritdoc />
     public Task<IGraphNodeQueryable<T>> SearchNodesAsync<T>(string query, IGraphTransaction? transaction = null)
         where T : INode
-        => GraphSearchHelper.SearchNodesAsync<T>(query, graphContext, transaction, logger);
+        => throw new NotSupportedException("Full-text search is not supported in Apache AGE. See docs/age-fulltext-search-limitations.md for details.");
 
     /// <inheritdoc />
     public Task<IGraphRelationshipQueryable<T>> SearchRelationshipsAsync<T>(string query, IGraphTransaction? transaction = null)
         where T : IRelationship
-        => GraphSearchHelper.SearchRelationshipsAsync<T>(query, graphContext, transaction, logger);
+        => throw new NotSupportedException("Full-text search is not supported in Apache AGE. See docs/age-fulltext-search-limitations.md for details.");
 
     /// <inheritdoc />
     public Task RecreateIndexesAsync(CancellationToken cancellationToken = default)
