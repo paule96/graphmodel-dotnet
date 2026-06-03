@@ -302,17 +302,19 @@ The constructor takes `Visit` as a `Func<Expression, Expression?>` delegate. The
 | m13 | Rename ambiguous `Visit` param in `PathSegmentHandler` | Renamed `_visit` → `_visitExpression` |
 | m9 | Unify `AgeGraphStore` constructors | Connection-string constructor now delegates to data-source constructor via `BuildDataSource()` |
 | M1 | Comments on empty catches | Added explanatory comments to intentional empty catches |
+| m3 | Move `ComplexPropertyLoadingFragment` to `ProjectionFragmentVisitor` | Moved fragment emission from `AgeCypherQueryVisitor.VisitThenSelect` into `ProjectionFragmentVisitor.HandleSelect` |
+| M8 | Single-pass validation in `PropertyRuleValidator` | Combined two passes into one using `seenProperties` HashSet — eliminates duplicate enumeration of `schema.Properties` |
+| M5 | Extract `FragmentBundle` for `AgeFragmentRenderer` | Created `FragmentBundle` record with `Extract()` factory — replaces 12 individual `OfType<T>().ToList()` calls with one |
 
 ### Not Completed (Lower Priority)
 
 | # | Issue | Notes |
 |---|-------|-------|
 | m1 | Remove unused default parameters from `EmitWhereFragment` | **Re-examined**: callers DO pass `alias` and `consumedAliases` — kept original signature |
-| m3 | Move `ComplexPropertyLoadingFragment` emission into `ProjectionFragmentVisitor` | Deferred — would require adding a callback or coupling visitor to fragment creation |
-| M5 | Extract `FragmentBundle` for `AgeFragmentRenderer` | Deferred — the god method is 215 lines but remains stable and well-tested |
-| M8 | Single-pass validation in `PropertyRuleValidator` | Deferred — low impact, validation correctness is more important than micro-optimization |
 
 ---
+
+## Baseline
 
 ## Baseline
 

@@ -140,9 +140,6 @@ internal sealed class AgeCypherQueryVisitor : ExpressionVisitor
     {
         Visit(node.Arguments[0]);
         _projectionVisitor.HandleSelect(node);
-        var complexPropertyFragment = new ComplexPropertyLoadingFragment(false, _context.Scope.CurrentAlias);
-        _context.AddFragment(complexPropertyFragment);
-        _logger.LogDebug("Emitted ComplexPropertyLoadingFragment (disabled)");
         return node;
     }
 

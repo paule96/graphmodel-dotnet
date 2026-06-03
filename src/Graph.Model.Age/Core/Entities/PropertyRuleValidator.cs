@@ -74,10 +74,20 @@ internal static class PropertyRuleValidator
         EntitySchemaInfo schema,
         string entityDisplayName)
     {
-        // First pass: check all required properties from schema are present.
-        // Dynamic entities use attribute Label values (e.g., "requiredString") as property keys,
-        // NOT C# property names (e.g., "RequiredString"). Match against PropertySchemaInfo.Name
-        // which contains the graph property name (attribute Label or C# fallback).
+        // Known system properties that don't need schema entries
+        var knownSystemProperties = new HashSet<string>(StringComparer.Ordinal)
+        {
+            nameof(INode.Labels), "user_id",
+            nameof(IRelationship.StartNodeId),
+            nameof(IRelationship.EndNodeId),
+            nameof(IRelationship.Type)
+        };
+
+        // Track which schema properties we've seen in properties dictionary
+        var seenProperties = new HashSet<string>(StringComparer.Ordinal);
+
+        // Single pass: validate all schema properties against the provided dictionary
+        // and check for unknown properties simultaneously.
         foreach (var propertySchema in schema.Properties.Values)
         {
             if (propertySchema.Ignore)
@@ -101,7 +111,10 @@ internal static class PropertyRuleValidator
                                 var defaultInstance = Activator.CreateInstance(propInfo.DeclaringType);
                                 var defaultValue = propInfo.GetValue(defaultInstance);
                                 if (defaultValue != null && (defaultValue is not string ds || !string.IsNullOrWhiteSpace(ds)))
+                                {
+                                    seenProperties.Add(graphName);
                                     continue;
+                                }
                             }
                             catch { }
                         }
@@ -112,7 +125,13 @@ internal static class PropertyRuleValidator
             }
 
             if (!exists || value is null)
+            {
+                // Property not provided but not required — still track it as handled
+                seenProperties.Add(graphName);
                 continue;
+            }
+
+            seenProperties.Add(graphName);
 
             // Validate enum values: if the CLR property type is an enum and the
             // dynamic value is a string, check it parses to a valid enum member.
@@ -137,25 +156,15 @@ internal static class PropertyRuleValidator
             ValidatePropertyValue(graphName, value, validation, entityDisplayName);
         }
 
-        // Second pass: check for extra/unknown properties.
+        // Check for extra/unknown properties not defined in schema.
         // Dynamic entities use attribute Label values, so match only against
         // PropertySchemaInfo.Name (the graph property name), NOT C# property names.
-        // This means "Note" (PascalCase) is correctly rejected when the Label is "note".
         foreach (var (propName, _) in properties)
         {
-            if (propName == nameof(INode.Labels) || propName == "user_id" ||
-                propName == nameof(IRelationship.StartNodeId) ||
-                propName == nameof(IRelationship.EndNodeId) ||
-                propName == nameof(IRelationship.Type))
+            if (knownSystemProperties.Contains(propName) || seenProperties.Contains(propName))
                 continue;
 
-            var isKnown = schema.Properties.Values.Any(p =>
-                string.Equals(p.Name, propName, StringComparison.Ordinal));
-
-            if (!isKnown)
-            {
-                throw new GraphException($"Property '{propName}' is not defined in the schema for {entityDisplayName}.");
-            }
+            throw new GraphException($"Property '{propName}' is not defined in the schema for {entityDisplayName}.");
         }
     }
 

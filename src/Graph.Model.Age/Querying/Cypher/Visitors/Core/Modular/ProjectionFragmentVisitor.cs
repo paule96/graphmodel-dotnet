@@ -21,12 +21,21 @@ internal sealed class ProjectionFragmentVisitor : FragmentEmittingVisitorBase
         _nestedCollectHandler = new NestedCollectHandler(context, logger);
     }
 
+    /// <summary>
+    /// Handles Select projection and emits ComplexPropertyLoadingFragment (disabled) to 
+    /// indicate that entity-level properties should not be expanded into separate columns.
+    /// </summary>
     public Expression HandleSelect(MethodCallExpression node)
     {
         Logger.LogDebug("Processing SELECT clause");
         var sourceExpression = node.Arguments[0];
         var lambda = ExtractLambda(node.Arguments[1]);
         if (lambda == null) return sourceExpression;
+
+        // For projections, disable complex property loading so entity properties are 
+        // inlined in the RETURN clause rather than expanded as OPTIONAL MATCH.
+        Context.AddFragment(new ComplexPropertyLoadingFragment(false, Context.Scope.CurrentAlias));
+        Logger.LogDebug("Emitted ComplexPropertyLoadingFragment (disabled)");
 
         // Simple parameter projection (x => x) — return entire entity
         if (lambda.Body is ParameterExpression)

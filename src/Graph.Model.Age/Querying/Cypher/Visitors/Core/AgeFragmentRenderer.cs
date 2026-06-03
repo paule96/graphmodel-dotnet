@@ -11,6 +11,41 @@ using Cvoya.Graph.Model.Cypher.Querying.Cypher.Visitors.Core;
 /// </summary>
 internal static class AgeFragmentRenderer
 {
+    /// <summary>
+    /// Groups all fragment types extracted from the fragment sequence into a single bundle,
+    /// reducing the number of repetitive OfType/ToList calls in the Render method.
+    /// </summary>
+    private sealed record FragmentBundle(
+        IReadOnlyList<ProjectionFragment> ProjectionFragments,
+        IReadOnlyList<WhereFragment> WhereFragments,
+        IReadOnlyList<OrderFragment> OrderFragments,
+        IReadOnlyList<AggregationFragment> AggregationFragments,
+        IReadOnlyList<GroupByFragment> GroupByFragments,
+        IReadOnlyList<OptionalMatchFragment> OptionalMatchFragments,
+        IReadOnlyList<ComplexPropertyLoadingFragment> ComplexPropertyToggles,
+        SkipFragment? SkipFragment,
+        LimitFragment? LimitFragment,
+        bool HasDistinct,
+        bool HasReverseOrder)
+    {
+        public static FragmentBundle Extract(IReadOnlyList<QueryFragment> fragments)
+        {
+            return new FragmentBundle(
+                ProjectionFragments: fragments.OfType<ProjectionFragment>().ToList(),
+                WhereFragments: fragments.OfType<WhereFragment>().ToList(),
+                OrderFragments: fragments.OfType<OrderFragment>().ToList(),
+                AggregationFragments: fragments.OfType<AggregationFragment>().ToList(),
+                GroupByFragments: fragments.OfType<GroupByFragment>().ToList(),
+                OptionalMatchFragments: fragments.OfType<OptionalMatchFragment>().ToList(),
+                ComplexPropertyToggles: fragments.OfType<ComplexPropertyLoadingFragment>().ToList(),
+                SkipFragment: fragments.OfType<SkipFragment>().LastOrDefault(),
+                LimitFragment: fragments.OfType<LimitFragment>().LastOrDefault(),
+                HasDistinct: fragments.OfType<DistinctFragment>().Any(),
+                HasReverseOrder: fragments.OfType<ReverseOrderFragment>().Any()
+            );
+        }
+    }
+
     public static string Render(IEnumerable<QueryFragment> fragments)
     {
         ArgumentNullException.ThrowIfNull(fragments);
@@ -18,51 +53,47 @@ internal static class AgeFragmentRenderer
         var fragmentList = fragments.ToList();
         if (fragmentList.Count == 0) return string.Empty;
 
-        var projectionFragments = fragmentList.OfType<ProjectionFragment>().ToList();
+        var bundle = FragmentBundle.Extract(fragmentList);
         var matchClauses = BuildMatchClauses(fragmentList);
-        var optionalMatchFragments = fragmentList.OfType<OptionalMatchFragment>().ToList();
-        var whereClauses = fragmentList.OfType<WhereFragment>().Select(f => f.PredicateText).ToList();
-        var complexPropertyToggles = fragmentList.OfType<ComplexPropertyLoadingFragment>().ToList();
-        var complexPropertyToggle = complexPropertyToggles.LastOrDefault();
+        var hasScalarAggregation = bundle.AggregationFragments.Count > 0 && bundle.GroupByFragments.Count == 0;
+        var complexPropertyToggle = bundle.ComplexPropertyToggles.LastOrDefault();
         var isComplexPropertyLoadingEnabled = complexPropertyToggle?.IsEnabled ?? false;
-        var aggregationFragments = fragmentList.OfType<AggregationFragment>().ToList();
-        var groupByFragments = fragmentList.OfType<GroupByFragment>().ToList();
-        var hasScalarAggregation = aggregationFragments.Count > 0 && groupByFragments.Count == 0;
-        var returnClause = isComplexPropertyLoadingEnabled ? null : DetermineReturnClause(fragmentList, projectionFragments);
-        var orderFragments = fragmentList.OfType<OrderFragment>().ToList();
-        var skipFragment = fragmentList.OfType<SkipFragment>().LastOrDefault();
-        var limitFragment = fragmentList.OfType<LimitFragment>().LastOrDefault();
-        var isDistinct = fragmentList.OfType<DistinctFragment>().Any();
-        var shouldReverseOrder = !hasScalarAggregation && fragmentList.OfType<ReverseOrderFragment>().Any();
+        var returnClause = isComplexPropertyLoadingEnabled
+            ? null
+            : DetermineReturnClause(fragmentList, bundle.ProjectionFragments);
+        var shouldReverseOrder = !hasScalarAggregation && bundle.HasReverseOrder;
 
         var builder = new StringBuilder();
 
         if (matchClauses.Count > 0)
             builder.AppendLine($"MATCH {string.Join(", ", matchClauses)}");
 
-        foreach (var opt in optionalMatchFragments)
+        foreach (var opt in bundle.OptionalMatchFragments)
         {
             if (!string.IsNullOrWhiteSpace(opt.Pattern))
                 builder.AppendLine($"OPTIONAL MATCH {opt.Pattern}");
         }
 
-        if (whereClauses.Count > 0)
+        if (bundle.WhereFragments.Count > 0)
+        {
+            var whereClauses = bundle.WhereFragments.Select(f => f.PredicateText).ToList();
             builder.AppendLine($"WHERE {string.Join(" AND ", whereClauses)}");
+        }
 
         if (isComplexPropertyLoadingEnabled)
         {
-            var alias = DetermineComplexPropertyAlias(complexPropertyToggles, fragmentList);
+            var alias = DetermineComplexPropertyAlias(bundle.ComplexPropertyToggles, fragmentList);
             AppendComplexPropertyLoadingBlock(builder, alias);
         }
         else if (!string.IsNullOrWhiteSpace(returnClause))
         {
-            var distinctPrefix = isDistinct ? "DISTINCT " : string.Empty;
+            var distinctPrefix = bundle.HasDistinct ? "DISTINCT " : string.Empty;
             builder.AppendLine($"RETURN {distinctPrefix}{returnClause}");
         }
 
-        if (orderFragments.Count > 0 && !hasScalarAggregation)
+        if (bundle.OrderFragments.Count > 0 && !hasScalarAggregation)
         {
-            var orderByClauses = orderFragments.Select(f =>
+            var orderByClauses = bundle.OrderFragments.Select(f =>
             {
                 var desc = f.Descending;
                 if (shouldReverseOrder) desc = !desc;
@@ -70,18 +101,18 @@ internal static class AgeFragmentRenderer
             }).ToList();
             builder.AppendLine($"ORDER BY {string.Join(", ", orderByClauses)}");
         }
-        else if (!hasScalarAggregation && skipFragment is not null && isDistinct)
+        else if (!hasScalarAggregation && bundle.SkipFragment is not null && bundle.HasDistinct)
         {
-            var primaryReturn = projectionFragments.SelectMany(f => f.Returns).FirstOrDefault()
+            var primaryReturn = bundle.ProjectionFragments.SelectMany(f => f.Returns).FirstOrDefault()
                 ?? returnClause?.Split(',', 2)[0].Trim();
             if (!string.IsNullOrWhiteSpace(primaryReturn))
                 builder.AppendLine($"ORDER BY {primaryReturn}{(shouldReverseOrder ? " DESC" : string.Empty)}");
         }
 
-        if (skipFragment is not null)
-            builder.AppendLine($"SKIP {skipFragment.Count}");
-        if (limitFragment is not null)
-            builder.AppendLine($"LIMIT {limitFragment.Count}");
+        if (bundle.SkipFragment is not null)
+            builder.AppendLine($"SKIP {bundle.SkipFragment.Count}");
+        if (bundle.LimitFragment is not null)
+            builder.AppendLine($"LIMIT {bundle.LimitFragment.Count}");
 
         return builder.ToString().Trim();
     }
