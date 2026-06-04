@@ -21,6 +21,7 @@ public class AdvancedQueryTests(TestInfrastructureFixture fixture) :
     // Pattern comprehension features are implemented in the AGE provider which has full
     // Cypher collect() support for grouped projections with nested Select().ToList() calls.
     // The Neo4j provider skips these until equivalently refactored.
+    // See docs/age-provider-branch-diff.md for the overall migration strategy.
 
     [Fact(Skip = "Pattern comprehensions with nested collections not yet implemented")]
     public async Task CanQueryWithBasicPatternComprehension() => await Task.CompletedTask;

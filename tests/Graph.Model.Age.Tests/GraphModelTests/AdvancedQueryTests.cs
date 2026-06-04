@@ -20,9 +20,12 @@ public class AdvancedQueryTests(TestInfrastructureFixture fixture) :
     AgeTest(fixture),
     IAdvancedQueryTests
 {
-    [Fact(Skip = "Too complex for now")]
+    // See docs/pattern-comprehension-limitations.md for root cause analysis and
+    // estimated fix effort for these two failing pattern comprehension tests.
+
+    [Fact(Skip = "Nested GroupBy not supported in AGE. See docs/pattern-comprehension-limitations.md")]
     public async Task CanQueryWithGroupedPatternComprehension() => await Task.CompletedTask;
 
-    [Fact(Skip = "Cross-collection correlation in projections not yet implemented")]
+    [Fact(Skip = "size() with pattern expressions not supported in AGE. See docs/pattern-comprehension-limitations.md")]
     public async Task CanProjectRelationshipCounts() => await Task.CompletedTask;
 }
