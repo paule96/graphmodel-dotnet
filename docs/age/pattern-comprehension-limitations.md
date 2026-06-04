@@ -181,6 +181,6 @@ These fixes enabled 6 previously failing tests to pass:
 ## Related Documentation
 
 - [Full-Text Search Limitations](./age-fulltext-search-limitations.md)
-- [Core Concepts](./core-concepts.md)
-- [Best Practices](./best-practices.md)
-- [Troubleshooting](./troubleshooting.md)
+- [Core Concepts](../core-concepts.md)
+- [Best Practices](../best-practices.md)
+- [Troubleshooting](../troubleshooting.md)

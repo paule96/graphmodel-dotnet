@@ -20,12 +20,12 @@ public class AdvancedQueryTests(TestInfrastructureFixture fixture) :
     AgeTest(fixture),
     IAdvancedQueryTests
 {
-    // See docs/pattern-comprehension-limitations.md for root cause analysis and
+    // See docs/age/pattern-comprehension-limitations.md for root cause analysis and
     // estimated fix effort for these two failing pattern comprehension tests.
 
-    [Fact(Skip = "Nested GroupBy not supported in AGE. See docs/pattern-comprehension-limitations.md")]
+    [Fact(Skip = "Nested GroupBy not supported in AGE. See docs/age/pattern-comprehension-limitations.md")]
     public async Task CanQueryWithGroupedPatternComprehension() => await Task.CompletedTask;
 
-    [Fact(Skip = "size() with pattern expressions not supported in AGE. See docs/pattern-comprehension-limitations.md")]
+    [Fact(Skip = "size() with pattern expressions not supported in AGE. See docs/age/pattern-comprehension-limitations.md")]
     public async Task CanProjectRelationshipCounts() => await Task.CompletedTask;
 }
